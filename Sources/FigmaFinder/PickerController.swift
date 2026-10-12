@@ -88,7 +88,7 @@ final class PickerController: NSWindowController {
     private func refresh() {
         let remembered = selected?.id ?? store.lastDestinationID
         let saved = store.destinations
-        if destinations.itemTitles != saved.map(\.name) || destinationIDs != saved.map(\.id) {
+        if destinations.numberOfItems == 0 || (!saved.isEmpty && destinations.itemTitles != saved.map(\.name)) || destinationIDs != saved.map(\.id) {
             destinations.removeAllItems()
             destinationIDs = saved.map(\.id)
             destinations.addItems(withTitles: saved.isEmpty ? ["No saved destinations"] : saved.map(\.name))

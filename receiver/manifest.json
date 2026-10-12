@@ -1,0 +1,14 @@
+{
+  "name": "Figma Finder Bridge",
+  "id": "figma-finder-bridge",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "enablePrivatePluginApi": true,
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["http://127.0.0.1:17847"]
+  }
+}

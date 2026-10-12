@@ -17,6 +17,16 @@ public struct Destination: Codable, Equatable, Identifiable {
         self.nodeID = nodeID
     }
 
+    private enum CodingKeys: String, CodingKey { case id, name, fileKey, pageID, nodeID }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        name = try values.decode(String.self, forKey: .name)
+        fileKey = try values.decode(String.self, forKey: .fileKey)
+        pageID = try values.decode(String.self, forKey: .pageID)
+        nodeID = try values.decodeIfPresent(String.self, forKey: .nodeID)
+    }
+
     public var url: URL {
         var url = URLComponents()
         url.scheme = "https"

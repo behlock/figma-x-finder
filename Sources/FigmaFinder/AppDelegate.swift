@@ -49,7 +49,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func sendToFigma(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
-        let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        var urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        if urls.isEmpty, let paths = pasteboard.propertyList(forType: NSPasteboard.PasteboardType("NSFilenamesPboardType")) as? [String] {
+            urls = paths.map { URL(fileURLWithPath: $0) }
+        }
         guard !urls.isEmpty else {
             error.pointee = "Select image files in Finder first." as NSString
             return
