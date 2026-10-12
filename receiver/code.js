@@ -107,6 +107,11 @@ async function importImage(job, imageID, bytes) {
 
 async function handle(message) {
   switch (message.type) {
+    case 'bootstrap':
+      return { token: await figma.clientStorage.getAsync('connectionKey') || '', fileKey: figma.fileKey || null, name: figma.currentPage.selection[0]?.name || figma.currentPage.name };
+    case 'resize':
+      figma.ui.resize(360, message.height === 460 ? 460 : 350);
+      return {};
     case 'configure':
       if (!/^[A-Fa-f0-9]{64}$/.test(message.token)) throw new Error('Copy the connection key from the macOS app.');
       await figma.clientStorage.setAsync('connectionKey', message.token);
@@ -148,9 +153,6 @@ if (typeof figma !== 'undefined') {
       }
     });
   };
-  figma.clientStorage.getAsync('connectionKey').then(token => {
-    figma.ui.postMessage({ type: 'ready', token: token || '', fileKey: figma.fileKey || null, name: figma.currentPage.name });
-  }).catch(() => figma.ui.postMessage({ type: 'ready', token: '', fileKey: figma.fileKey || null, name: figma.currentPage.name }));
 }
 
 if (typeof module !== 'undefined') module.exports = { validateContainer, importImage, resolveDestination, bottomInParent };

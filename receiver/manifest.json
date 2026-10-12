@@ -9,6 +9,6 @@
   "enablePrivatePluginApi": true,
   "networkAccess": {
     "allowedDomains": ["none"],
-    "devAllowedDomains": ["http://127.0.0.1:17847"]
+    "devAllowedDomains": ["http://localhost:17847"]
   }
 }
