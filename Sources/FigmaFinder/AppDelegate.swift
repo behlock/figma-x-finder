@@ -6,13 +6,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let store: Store
     private var picker: PickerController?
     private var receivedFiles = false
+    private let server: LocalServer
+    private var lastActivity = Date()
+    private var idleTimer: Timer?
 
     init(store: Store) throws {
         self.store = store
+        self.server = LocalServer(store: store)
         super.init()
+        server.onRequest = { [weak self] in self?.lastActivity = Date() }
+        server.onFailure = { [weak self] message in
+            self?.showError("Couldn’t start the local receiver connection", message: message)
+        }
+        try server.start()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, Date().timeIntervalSince(self.lastActivity) > 120,
+                      !NSApp.windows.contains(where: \.isVisible) else { return }
+                NSApp.terminate(nil)
+            }
+        }
         let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.first == "--send" {
             showPicker(arguments.dropFirst().map { URL(fileURLWithPath: $0) })
@@ -43,11 +59,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPicker(_ urls: [URL]) {
+        lastActivity = Date()
         picker?.close()
         let controller = PickerController(store: store, urls: urls)
         picker = controller
         controller.showWindow(nil)
         controller.window?.center()
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func showError(_ title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.runModal()
     }
 }
