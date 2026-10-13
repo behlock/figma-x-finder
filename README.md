@@ -4,7 +4,7 @@ Send downloaded images from Finder to a saved Figma Design page or frame. Inspir
 
 Select images → **Services → Send to Figma…** → choose a destination → send.
 
-The app is a small native macOS Service with a destination picker. A tiny Figma plugin registers destinations and receives images. Pending images are copied into a local queue so you can move or delete the originals after sending. Imports preserve proportions and append beneath existing content.
+The app is a small native macOS Service with a destination picker. A tiny Figma plugin registers destinations and receives images. Pending images are copied into a local queue so you can move or delete the originals after sending. Imports preserve proportions and find open space near existing references.
 
 ## App outline
 
@@ -56,7 +56,9 @@ During development, use `bash scripts/build-app.sh` and import `receiver/manifes
 
 ## Placement and limits
 
-Images use a maximum display width of 320 pixels, up to four columns, and 24-pixel spacing. Each batch gets a transparent auto-layout frame; new batches append below existing content. Source filenames become layer names. Figma destination frames grow as needed so their clipping does not hide the new images.
+Images use a maximum display width of 320 pixels with 64 pixels of breathing room. The receiver places each image in a nearby gap, avoiding visible existing layers—including page layers that visually overlap a destination frame. It checks transformed bounds for rotated references. Placement is deterministic, with no random rotations, content analysis, or rearrangement of earlier imports.
+
+An empty frame starts at its centre; an empty page starts at the current viewport centre. Full frames expand downward as needed. Images are individual layers that you can drag anywhere, with source filenames as layer names. Older imports in auto-layout batches are left in place and remain safe to retry.
 
 The receiver rejects locked, hidden, rotated, or auto-layout destination frames, and frames inside components, auto-layout parents, or clipping parents. It does not alter those layouts automatically. A missing destination keeps its batch queued; this first version has no queue retargeting UI.
 
@@ -71,9 +73,11 @@ bash scripts/test.sh
 bash scripts/build-app.sh
 ```
 
-Six Swift tests cover persistence, deletion of originals, pixel and byte limits, mixed selections, destination identity, authentication, and HTTP parsing. Six Node tests cover image layout, retries, destination guards, page imports, the startup handshake, and authenticated registration.
+Six Swift tests cover persistence, deletion of originals, pixel and byte limits, mixed selections, destination identity, authentication, and HTTP parsing. Nine Node tests cover spacing and proportions, overlapping sibling layers, rotated references, empty and full destinations, safe frame expansion, retries of older imports, destination guards, page imports, the startup handshake, and authenticated registration.
 
-The live macOS/Figma test verified the Service in Finder’s context menu, receipt of all ten selected PNGs, pairing, frame registration, ten image layers in three rows, preserved landscape/portrait/square proportions, and a cleared queue after acknowledgement. The generated test batch was removed afterward; the destination’s original dimensions and contents were restored.
+The initial live macOS/Figma test verified the Service in Finder’s context menu, receipt of all ten selected PNGs, pairing, frame registration, preserved landscape/portrait/square proportions, and a cleared queue after acknowledgement. Generated test imports were removed afterward; the destination’s original dimensions and contents were restored.
+
+The freeform placement test imported ten mixed-proportion images directly into Inspo, checked 64-pixel separation from all existing references (including page siblings), and confirmed that the frame dimensions and earlier imports stayed unchanged. The temporary images were then removed.
 
 ## Assumptions
 
@@ -96,7 +100,7 @@ Figma’s remote MCP tools support canvas writes and asset uploads, but [new MCP
 
 - Finder supplies the entire selection, including paths containing spaces and Unicode.
 - A batch of ten images goes to the exact saved page/frame without cropping.
-- Later batches append without rearranging earlier images.
+- Later images fill available space without overlapping or rearranging earlier images.
 - Queued bytes survive app relaunch and deletion of the original files.
 - Interrupted delivery retries without duplicating an already-created image.
 - Missing or invalid destinations retain pending images and explain the problem.
