@@ -38,6 +38,8 @@ bash scripts/install.sh
 
 This installs into your personal Applications folder. Pass an alternative application directory as the first argument if needed. The development build is signed locally, rather than notarized for public distribution.
 
+Installation quits running copies before updating and unregisters the build-folder copy from Finder Services. If a second copy is opened later, it gracefully replaces the running copy before loading the shared queue and opening the local connection.
+
 1. Open **Figma Finder Bridge.app**. Choose **Show receiver plugin**.
 2. In Figma Desktop, choose **Plugins → Development → Import plugin from manifest…** and select that `manifest.json`.
 3. Open your inspiration file, select a freeform frame or deselect everything for a page destination, and run **Figma Finder Bridge**.
