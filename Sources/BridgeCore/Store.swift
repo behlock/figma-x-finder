@@ -173,24 +173,31 @@ public final class Store {
 
     private func prepareImage(_ url: URL, to output: URL) throws -> (Int, Int) {
         guard url.isFileURL,
-              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil)
+        else { throw BridgeError.message("Not a readable image.") }
+        // Detailed photos can exceed the byte budget even within the pixel limit.
+        // Re-render from the original at smaller sizes, retaining PNG transparency.
+        for maxPixels in [4096, 3072, 2048, 1024] {
+            guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: 4096
+                kCGImageSourceThumbnailMaxPixelSize: maxPixels
               ] as CFDictionary)
-        else { throw BridgeError.message("Not a readable image.") }
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
-            throw BridgeError.message("Couldn’t prepare this image.")
+            else { throw BridgeError.message("Not a readable image.") }
+            let data = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
+                throw BridgeError.message("Couldn’t prepare this image.")
+            }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination) else {
+                throw BridgeError.message("Couldn’t prepare this image.")
+            }
+            guard data.length <= 10 * 1024 * 1024 else { continue }
+            try (data as Data).write(to: output, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: output.path)
+            return (image.width, image.height)
         }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination), data.length <= 10 * 1024 * 1024 else {
-            throw BridgeError.message("Prepared image exceeds 10 MB.")
-        }
-        try (data as Data).write(to: output, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: output.path)
-        return (image.width, image.height)
+        throw BridgeError.message("Couldn’t fit the prepared image within 10 MB.")
     }
 
     public func remember(_ id: String) throws {

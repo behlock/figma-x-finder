@@ -11,8 +11,21 @@ final class BridgeCoreTests: XCTestCase {
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: directory) }
 
-    private func image(name: String = "reference image 日本.png", width: Int = 20, height: Int = 10) throws -> URL {
+    private func image(name: String = "reference image 日本.png", width: Int = 20, height: Int = 10, noisy: Bool = false) throws -> URL {
         let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        if noisy {
+            let pixels = context.data!.assumingMemoryBound(to: UInt8.self)
+            var seed: UInt32 = 12345
+            for offset in stride(from: 0, to: width * height * 4, by: 4) {
+                seed ^= seed << 13
+                seed ^= seed >> 17
+                seed ^= seed << 5
+                pixels[offset] = UInt8(truncatingIfNeeded: seed)
+                pixels[offset + 1] = UInt8(truncatingIfNeeded: seed >> 8)
+                pixels[offset + 2] = UInt8(truncatingIfNeeded: seed >> 16)
+                pixels[offset + 3] = 255
+            }
+        }
         let url = directory.appendingPathComponent(name)
         let output = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
         CGImageDestinationAddImage(output, context.makeImage()!, nil)
@@ -68,6 +81,24 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertEqual(store.destinations.count, 1)
         XCTAssertEqual(store.destinations[0].id, id)
         XCTAssertThrowsError(try store.save(Destination(name: "Bad", fileKey: "../bad", pageID: "0:1", nodeID: nil)))
+    }
+
+    func testDetailedImageIsResizedToFitByteBudgetWithoutChangingOriginal() throws {
+        let store = try store()
+        let original = try image(width: 2400, height: 2400, noisy: true)
+        let originalBytes = try Data(contentsOf: original)
+        XCTAssertGreaterThan(originalBytes.count, 10 * 1024 * 1024)
+        let result = try store.enqueue([original], destination: store.destinations[0])
+        let image = try XCTUnwrap(result.job.images.first)
+        let bytes = try store.imageData(jobID: result.job.id, imageID: image.id)
+        XCTAssertLessThanOrEqual(bytes.count, 10 * 1024 * 1024)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(bytes as CFData, nil))
+        let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(decoded.width, image.width)
+        XCTAssertEqual(decoded.height, image.height)
+        XCTAssertEqual(image.width, image.height)
+        XCTAssertLessThan(image.width, 2400)
+        XCTAssertEqual(try Data(contentsOf: original), originalBytes)
     }
 
     func testHTTPRequiresTokenAndReassemblesPartialBody() throws {

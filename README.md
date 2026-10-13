@@ -60,7 +60,7 @@ Images use a maximum display width of 320 pixels, up to four columns, and 24-pix
 
 The receiver rejects locked, hidden, rotated, or auto-layout destination frames, and frames inside components, auto-layout parents, or clipping parents. It does not alter those layouts automatically. A missing destination keeps its batch queued; this first version has no queue retargeting UI.
 
-Up to 100 files per batch. ImageIO decodes the first image of supported formats, corrects orientation, resizes to 4096 pixels per dimension, and encodes PNG. Animated and multi-page files become still images. Prepared PNGs over 10 MB are skipped with an explanation.
+Up to 100 files per batch. ImageIO decodes the first image of supported formats, corrects orientation, resizes to at most 4096 pixels per dimension, and encodes PNG. Detailed images are automatically resized further to fit the 10 MB limit. Originals stay unchanged and transparency is preserved. Animated and multi-page files become still images.
 
 The local server binds to `127.0.0.1:17847`; the development plugin connects through the `localhost` domain permitted by Figma. Image reads, registration, and acknowledgements require the pairing key. The app stores its key, destinations, and pending images in `~/Library/Application Support/Figma Finder Bridge/`, with private directory/file permissions. Completed image copies are removed after the receiver acknowledges them. No original file paths are sent to Figma.
 
@@ -71,7 +71,7 @@ bash scripts/test.sh
 bash scripts/build-app.sh
 ```
 
-Five Swift tests cover persistence, deletion of originals, resizing, mixed selections, destination identity, authentication, and HTTP parsing. Six Node tests cover image layout, retries, destination guards, page imports, the startup handshake, and authenticated registration.
+Six Swift tests cover persistence, deletion of originals, pixel and byte limits, mixed selections, destination identity, authentication, and HTTP parsing. Six Node tests cover image layout, retries, destination guards, page imports, the startup handshake, and authenticated registration.
 
 The live macOS/Figma test verified the Service in Finder’s context menu, receipt of all ten selected PNGs, pairing, frame registration, ten image layers in three rows, preserved landscape/portrait/square proportions, and a cleared queue after acknowledgement. The generated test batch was removed afterward; the destination’s original dimensions and contents were restored.
 
