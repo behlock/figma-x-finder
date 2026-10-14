@@ -31,21 +31,20 @@ final class PickerController: NSWindowController {
         super.init(window: window)
         window.onCancel = { [weak self] in self?.close() }
 
-        let title = PanelStyle.label(urls.isEmpty ? "Connect to Figma" : "Send to Figma", size: 22, weight: .medium)
-        let heading = NSStackView(views: [title])
-        if urls.isEmpty {
-            heading.addArrangedSubview(PanelStyle.label("A home for your inspiration.", color: .secondaryLabelColor))
-        }
-        heading.orientation = .vertical
-        heading.alignment = .leading
-        heading.spacing = 5
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
         stack.detachesHiddenViews = true
         stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(heading)
         if urls.isEmpty {
+            let heading = NSStackView(views: [
+                PanelStyle.label("Connect to Figma", size: 22, weight: .medium),
+                PanelStyle.label("A home for your inspiration.", color: .secondaryLabelColor)
+            ])
+            heading.orientation = .vertical
+            heading.alignment = .leading
+            heading.spacing = 5
+            stack.addArrangedSubview(heading)
             let instructions = PanelStyle.label("Import the receiver plugin in Figma, copy the connection key into it, then save a page or frame as a destination.", color: .secondaryLabelColor, wrapping: true)
             stack.addArrangedSubview(instructions)
             let key = NSTextField(string: store.token)
@@ -77,8 +76,7 @@ final class PickerController: NSWindowController {
         destinations.target = self
         destinations.action = #selector(destinationChanged)
         destinations.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let destinationLabel = PanelStyle.label("Destination", size: 11, color: .secondaryLabelColor)
-        let destinationFields = NSStackView(views: [destinationLabel, destinations])
+        let destinationFields = NSStackView(views: [destinations])
         destinationFields.orientation = .vertical
         destinationFields.alignment = .leading
         destinationFields.spacing = 3
