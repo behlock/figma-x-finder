@@ -50,7 +50,7 @@ Installation quits running copies before updating and unregisters the build-fold
 
 Select images in Finder → **Services → Send to Figma…** → choose the destination → **Send**.
 
-Keep the receiver running in that file while collecting. If you close it, images remain queued. The app exits after two minutes without a visible window or authenticated receiver requests; reopen it to resume a pending queue. **Open Figma** opens the saved destination using the system’s Figma link handler, which may use Figma Desktop, Beta, or your browser.
+Keep the receiver running in that file while collecting. If you close it, images remain queued. The app exits after two minutes without a visible window or authenticated receiver requests; reopen it to resume a pending queue.
 
 If the Service is missing, open the installed app once and check **System Settings → Keyboard → Keyboard Shortcuts → Services**. You can assign a keyboard shortcut there. The picker remembers your last destination.
 

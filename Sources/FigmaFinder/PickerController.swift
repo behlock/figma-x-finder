@@ -103,17 +103,6 @@ final class PickerController: NSWindowController {
         status.setContentCompressionResistancePriority(.required, for: .vertical)
         stack.addArrangedSubview(status)
 
-        let open = secondaryButton("Open Figma ↗", action: #selector(openFigma))
-        open.setAccessibilityLabel("Open Figma")
-        let footer = NSView()
-        footer.addSubview(open)
-        NSLayoutConstraint.activate([
-            open.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
-            open.topAnchor.constraint(equalTo: footer.topAnchor),
-            open.bottomAnchor.constraint(equalTo: footer.bottomAnchor),
-            footer.heightAnchor.constraint(equalToConstant: 28)
-        ])
-        stack.addArrangedSubview(footer)
         window.contentView!.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24),
@@ -233,9 +222,7 @@ final class PickerController: NSWindowController {
         } else { status.stringValue = "The receiver plugin isn’t included in this build yet." }
     }
 
-    @objc private func openFigma() {
-        NSWorkspace.shared.open(selected?.url ?? URL(string: "https://www.figma.com")!)
-    }
+
 }
 
 @MainActor
