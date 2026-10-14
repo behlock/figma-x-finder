@@ -6,6 +6,8 @@ Select images → **Services → Send to Figma…** → choose a destination →
 
 The app is a small native macOS Service with a destination picker. A tiny Figma plugin registers destinations and receives images. Pending images are copied into a local queue so you can move or delete the originals after sending. Imports preserve proportions and find open space near existing references.
 
+The Send panel uses a quiet, adaptive surface inspired by the [Neuralink interface reference](design/panel-reference.md): local file previews, softly inset controls, a circular blue Send arrow, and a checkmark after acknowledgement. Return sends, Escape closes, and the destination menu keeps its native keyboard behavior. Long names truncate, errors remain visible, and the window fits its content.
+
 ## App outline
 
 - One macOS app, no menu bar utility or separate server installation.

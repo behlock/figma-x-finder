@@ -7,71 +7,149 @@ final class PickerController: NSWindowController {
     private let urls: [URL]
     private let destinations = NSPopUpButton()
     private let status = NSTextField(wrappingLabelWithString: "")
-    private let sendButton = NSButton(title: "Send", target: nil, action: nil)
+    private let sendButton = CircularSendButton(title: "Send", target: nil, action: nil)
+    private let stack = NSStackView()
     private var destinationIDs: [String] = []
     private var timer: Timer?
     private var jobID: String?
     private var sentCount = 0
     private var sentName = ""
     private var skippedCount = 0
+    private var sendError: String?
 
     init(store: Store, urls: [URL]) {
         self.store = store
         self.urls = urls
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: urls.isEmpty ? 330 : 250), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 380), styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Send to Figma"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
+        window.contentView = PanelSurface(color: PanelStyle.background, radius: 0)
         super.init(window: window)
-        let title = NSTextField(labelWithString: urls.isEmpty ? "Connect your inspiration board" : "Send \(urls.count) selected file\(urls.count == 1 ? "" : "s")")
-        title.font = .systemFont(ofSize: 17, weight: .semibold)
-        status.textColor = .secondaryLabelColor
-        let stack = NSStackView()
+
+        let title = PanelStyle.label(urls.isEmpty ? "Connect to Figma" : "Send to Figma", size: 22, weight: .medium)
+        let subtitle = PanelStyle.label(urls.isEmpty ? "A home for your inspiration." : "Choose where your inspiration lands.", color: .secondaryLabelColor)
+        let heading = NSStackView(views: [title, subtitle])
+        heading.orientation = .vertical
+        heading.alignment = .leading
+        heading.spacing = 5
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 16
+        stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(title)
+        stack.addArrangedSubview(heading)
         if urls.isEmpty {
-            let instructions = NSTextField(wrappingLabelWithString: "Import the receiver plugin in Figma. Copy this connection key into it, then save the current page or selected frame as a destination.")
-            instructions.textColor = .secondaryLabelColor
+            let instructions = PanelStyle.label("Import the receiver plugin in Figma, copy the connection key into it, then save a page or frame as a destination.", color: .secondaryLabelColor, wrapping: true)
             stack.addArrangedSubview(instructions)
             let key = NSTextField(string: store.token)
             key.isEditable = false
             key.isSelectable = true
+            key.isBordered = false
+            key.drawsBackground = false
+            key.textColor = .secondaryLabelColor
             key.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
             key.lineBreakMode = .byTruncatingMiddle
+            key.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             key.setAccessibilityLabel("Connection key")
-            stack.addArrangedSubview(key)
-            let copy = NSButton(title: "Copy connection key", target: self, action: #selector(copyKey))
-            let reveal = NSButton(title: "Show receiver plugin", target: self, action: #selector(revealPlugin))
+            stack.addArrangedSubview(PanelStyle.surface(around: key))
+            let copy = secondaryButton("Copy connection key", action: #selector(copyKey))
+            let reveal = secondaryButton("Show receiver plugin", action: #selector(revealPlugin))
             let setupButtons = NSStackView(views: [copy, reveal])
-            setupButtons.spacing = 8
+            setupButtons.spacing = 16
             stack.addArrangedSubview(setupButtons)
-            key.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        } else {
+            stack.addArrangedSubview(PanelStyle.preview(urls))
         }
         destinations.setAccessibilityLabel("Figma destination")
-        stack.addArrangedSubview(destinations)
-        stack.addArrangedSubview(status)
+        destinations.isBordered = false
+        destinations.font = .systemFont(ofSize: 17, weight: .regular)
+        destinations.cell?.lineBreakMode = .byTruncatingTail
+        destinations.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        destinations.target = self
+        destinations.action = #selector(destinationChanged)
+        destinations.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let destinationLabel = PanelStyle.label("Destination", size: 11, color: .secondaryLabelColor)
+        let destinationFields = NSStackView(views: [destinationLabel, destinations])
+        destinationFields.orientation = .vertical
+        destinationFields.alignment = .leading
+        destinationFields.spacing = 3
+        destinations.widthAnchor.constraint(equalTo: destinationFields.widthAnchor).isActive = true
+        destinationFields.setContentHuggingPriority(.defaultLow, for: .horizontal)
         sendButton.target = self
         sendButton.action = #selector(send)
         sendButton.keyEquivalent = "\r"
-        let cancel = NSButton(title: "Close", target: self, action: #selector(dismiss))
+        sendButton.isBordered = false
+        sendButton.focusRingType = .exterior
+        sendButton.toolTip = "Send to Figma (Return)"
+        sendButton.setAccessibilityLabel("Send")
+        let destinationRow = NSStackView(views: urls.isEmpty ? [destinationFields] : [destinationFields, sendButton])
+        destinationRow.alignment = .centerY
+        destinationRow.spacing = 12
+        destinationFields.widthAnchor.constraint(equalTo: destinationRow.widthAnchor, constant: urls.isEmpty ? 0 : -66).isActive = true
+        if !urls.isEmpty {
+            sendButton.widthAnchor.constraint(equalToConstant: 54).isActive = true
+            sendButton.heightAnchor.constraint(equalToConstant: 54).isActive = true
+        }
+        stack.addArrangedSubview(PanelStyle.surface(around: destinationRow))
+        status.font = .systemFont(ofSize: 12)
+        status.textColor = .secondaryLabelColor
+        status.setContentCompressionResistancePriority(.required, for: .vertical)
+        stack.addArrangedSubview(status)
+
+        let cancel = secondaryButton("Close", action: #selector(dismiss))
         cancel.keyEquivalent = "\u{1b}"
-        let open = NSButton(title: "Open Figma", target: self, action: #selector(openFigma))
-        let buttons = NSStackView(views: urls.isEmpty ? [cancel, open] : [cancel, open, sendButton])
-        buttons.spacing = 8
-        stack.addArrangedSubview(buttons)
+        let open = secondaryButton("Open Figma ↗", action: #selector(openFigma))
+        open.setAccessibilityLabel("Open Figma")
+        let footer = NSView()
+        footer.addSubview(cancel)
+        footer.addSubview(open)
+        NSLayoutConstraint.activate([
+            cancel.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
+            cancel.topAnchor.constraint(equalTo: footer.topAnchor),
+            cancel.bottomAnchor.constraint(equalTo: footer.bottomAnchor),
+            open.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
+            open.topAnchor.constraint(equalTo: footer.topAnchor),
+            open.bottomAnchor.constraint(equalTo: footer.bottomAnchor),
+            footer.heightAnchor.constraint(equalToConstant: 28)
+        ])
+        stack.addArrangedSubview(footer)
         window.contentView!.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24),
             stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24),
-            stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24),
-            destinations.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            status.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 48)
         ])
+        for view in stack.arrangedSubviews { view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
+        }
+    }
+
+    private func secondaryButton(_ title: String, action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.isBordered = false
+        button.bezelStyle = .inline
+        button.font = .systemFont(ofSize: 12, weight: .medium)
+        button.contentTintColor = .secondaryLabelColor
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
+        return button
+    }
+
+    private func fitWindow() {
+        guard let window, let content = window.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        let height = ceil(stack.fittingSize.height) + 72
+        if abs(content.bounds.height - height) > 1 {
+            var frame = window.frame
+            let delta = height - content.bounds.height
+            frame.size.height += delta
+            frame.origin.y -= delta
+            window.setFrame(frame, display: true)
         }
     }
 
@@ -96,22 +174,34 @@ final class PickerController: NSWindowController {
         }
         destinations.isEnabled = !saved.isEmpty && jobID == nil
         sendButton.isEnabled = !urls.isEmpty && selected != nil && jobID == nil
+        sendButton.completed = false
+        sendButton.setAccessibilityLabel("Send")
+        status.textColor = .secondaryLabelColor
         if let jobID {
             if let job = store.jobs.first(where: { $0.id == jobID }) {
-                status.stringValue = job.lastError ?? "\(job.images.count - job.completed.count) images queued. Run the receiver in \(sentName) to finish."
+                if job.lastError != nil { status.textColor = .systemRed }
+                let pending = job.images.count - job.completed.count
+                status.stringValue = job.lastError ?? "\(pending) image\(pending == 1 ? "" : "s") queued. Run the receiver in \(sentName) to finish."
             } else {
+                sendButton.completed = true
+                sendButton.setAccessibilityLabel("Sent")
                 status.stringValue = "Added \(sentCount) image\(sentCount == 1 ? "" : "s") to \(sentName)." + (skippedCount > 0 ? " \(skippedCount) skipped." : "")
             }
+        } else if let sendError {
+            status.stringValue = sendError
+            status.textColor = .systemRed
         } else if urls.isEmpty {
             let pending = store.jobs.reduce(0) { $0 + $1.images.count - $1.completed.count }
             status.stringValue = pending > 0 ? "\(pending) images waiting for Figma." : "Choose images in Finder, then Services → Send to Figma…"
         } else {
             status.stringValue = saved.isEmpty ? "Open this app without files to connect a Figma destination first." : "Images will be copied into this destination."
         }
+        fitWindow()
     }
 
     @objc private func send() {
         guard let destination = selected else { return }
+        sendError = nil
         do {
             let result = try store.enqueue(urls, destination: destination)
             jobID = result.job.id
@@ -125,8 +215,13 @@ final class PickerController: NSWindowController {
                 alert.informativeText = result.skipped.joined(separator: "\n")
                 alert.beginSheetModal(for: window!)
             }
-        } catch { status.stringValue = error.localizedDescription }
+        } catch {
+            sendError = error.localizedDescription
+            refresh()
+        }
     }
+
+    @objc private func destinationChanged() { sendError = nil; refresh() }
 
     @objc private func copyKey() {
         NSPasteboard.general.clearContents()
