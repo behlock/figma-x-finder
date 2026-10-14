@@ -20,7 +20,7 @@ final class PickerController: NSWindowController {
     init(store: Store, urls: [URL]) {
         self.store = store
         self.urls = urls
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 380), styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+        let window = PickerWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 380), styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Send to Figma"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
@@ -29,16 +29,20 @@ final class PickerController: NSWindowController {
         window.isReleasedWhenClosed = false
         window.contentView = PanelSurface(color: PanelStyle.background, radius: 0)
         super.init(window: window)
+        window.onCancel = { [weak self] in self?.close() }
 
         let title = PanelStyle.label(urls.isEmpty ? "Connect to Figma" : "Send to Figma", size: 22, weight: .medium)
-        let subtitle = PanelStyle.label(urls.isEmpty ? "A home for your inspiration." : "Choose where your inspiration lands.", color: .secondaryLabelColor)
-        let heading = NSStackView(views: [title, subtitle])
+        let heading = NSStackView(views: [title])
+        if urls.isEmpty {
+            heading.addArrangedSubview(PanelStyle.label("A home for your inspiration.", color: .secondaryLabelColor))
+        }
         heading.orientation = .vertical
         heading.alignment = .leading
         heading.spacing = 5
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
+        stack.detachesHiddenViews = true
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(heading)
         if urls.isEmpty {
@@ -99,17 +103,11 @@ final class PickerController: NSWindowController {
         status.setContentCompressionResistancePriority(.required, for: .vertical)
         stack.addArrangedSubview(status)
 
-        let cancel = secondaryButton("Close", action: #selector(dismiss))
-        cancel.keyEquivalent = "\u{1b}"
         let open = secondaryButton("Open Figma ↗", action: #selector(openFigma))
         open.setAccessibilityLabel("Open Figma")
         let footer = NSView()
-        footer.addSubview(cancel)
         footer.addSubview(open)
         NSLayoutConstraint.activate([
-            cancel.leadingAnchor.constraint(equalTo: footer.leadingAnchor),
-            cancel.topAnchor.constraint(equalTo: footer.topAnchor),
-            cancel.bottomAnchor.constraint(equalTo: footer.bottomAnchor),
             open.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
             open.topAnchor.constraint(equalTo: footer.topAnchor),
             open.bottomAnchor.constraint(equalTo: footer.bottomAnchor),
@@ -155,7 +153,6 @@ final class PickerController: NSWindowController {
 
     required init?(coder: NSCoder) { nil }
     override func close() { timer?.invalidate(); super.close() }
-    @objc private func dismiss() { close() }
 
     private var selected: Destination? {
         let index = destinations.indexOfSelectedItem
@@ -194,8 +191,9 @@ final class PickerController: NSWindowController {
             let pending = store.jobs.reduce(0) { $0 + $1.images.count - $1.completed.count }
             status.stringValue = pending > 0 ? "\(pending) images waiting for Figma." : "Choose images in Finder, then Services → Send to Figma…"
         } else {
-            status.stringValue = saved.isEmpty ? "Open this app without files to connect a Figma destination first." : "Images will be copied into this destination."
+            status.stringValue = saved.isEmpty ? "Open this app without files to connect a Figma destination first." : ""
         }
+        status.isHidden = status.stringValue.isEmpty
         fitWindow()
     }
 
@@ -238,4 +236,10 @@ final class PickerController: NSWindowController {
     @objc private func openFigma() {
         NSWorkspace.shared.open(selected?.url ?? URL(string: "https://www.figma.com")!)
     }
+}
+
+@MainActor
+private final class PickerWindow: NSWindow {
+    var onCancel: (() -> Void)?
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
 }
