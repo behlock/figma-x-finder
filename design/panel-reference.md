@@ -20,3 +20,7 @@ These are visual observations from the compressed video, not original design tok
 Use a white/light adaptive panel, quieter title-bar treatment, regular-to-medium system typography, softly inset preview and destination surfaces, and a blue circular Send arrow with a pale halo. Show a check when Figma acknowledges an import. Keep explicit textual status, native destination menus, keyboard shortcuts, and accessible action names. The file preview is local and bounded in size.
 
 Keep the existing Send, pairing, and queue behavior, with Escape and the window control for closing. The Send panel has no secondary footer actions. Use readable secondary text rather than copying the video's faintest labels. Support macOS dark appearance with corresponding charcoal surfaces. Do not introduce the video's animated cursor effects or background wallpaper into this small utility.
+
+## nothing-id image strip
+
+The subsequent image-picker reference is [`web/components/cluster/marker-detail-panel.tsx`](../../nothing-id/web/components/cluster/marker-detail-panel.tsx). Its source thumbnails toggle between 96-pixel squares with 15-pixel corners and 30-pixel squares with 9-pixel corners, using 8-pixel spacing, square cover crops, and horizontal scrolling with a fading edge. The native adaptation shows all selected files, preserves filenames in tooltips and accessibility labels, and uses an auto-hiding overlay scrollbar. It replaces the earlier three-preview card and does not change imported image proportions.

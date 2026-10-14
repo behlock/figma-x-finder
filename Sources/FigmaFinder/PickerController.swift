@@ -65,7 +65,9 @@ final class PickerController: NSWindowController {
             setupButtons.spacing = 16
             stack.addArrangedSubview(setupButtons)
         } else {
-            stack.addArrangedSubview(PanelStyle.preview(urls))
+            let preview = ImagePreviewStrip(urls: urls)
+            preview.onSizeChange = { [weak self] in self?.fitWindow(animated: true) }
+            stack.addArrangedSubview(preview)
         }
         destinations.setAccessibilityLabel("Figma destination")
         destinations.isBordered = false
@@ -127,7 +129,7 @@ final class PickerController: NSWindowController {
         return button
     }
 
-    private func fitWindow() {
+    private func fitWindow(animated: Bool = false) {
         guard let window, let content = window.contentView else { return }
         content.layoutSubtreeIfNeeded()
         let height = ceil(stack.fittingSize.height) + 72
@@ -136,7 +138,7 @@ final class PickerController: NSWindowController {
             let delta = height - content.bounds.height
             frame.size.height += delta
             frame.origin.y -= delta
-            window.setFrame(frame, display: true)
+            window.setFrame(frame, display: true, animate: animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
         }
     }
 

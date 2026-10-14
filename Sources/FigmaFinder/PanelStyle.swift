@@ -1,5 +1,4 @@
 import AppKit
-import ImageIO
 
 @MainActor
 enum PanelStyle {
@@ -36,51 +35,6 @@ enum PanelStyle {
             content.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -padding)
         ])
         return view
-    }
-
-    static func preview(_ urls: [URL]) -> NSView {
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        for url in urls.prefix(3) {
-            let view = NSImageView()
-            if let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-               let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: 128
-               ] as CFDictionary) {
-                view.image = NSImage(cgImage: thumbnail, size: .zero)
-            } else {
-                view.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
-                view.contentTintColor = .secondaryLabelColor
-            }
-            view.imageScaling = .scaleProportionallyUpOrDown
-            view.wantsLayer = true
-            view.layer?.cornerRadius = 7
-            view.layer?.masksToBounds = true
-            view.setAccessibilityLabel(url.lastPathComponent)
-            row.addArrangedSubview(view)
-            view.widthAnchor.constraint(equalToConstant: 52).isActive = true
-            view.heightAnchor.constraint(equalToConstant: 52).isActive = true
-        }
-        let name = label(urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) selected files", size: 13, weight: .medium)
-        name.lineBreakMode = .byTruncatingMiddle
-        name.maximumNumberOfLines = 1
-        name.toolTip = urls.prefix(3).map(\.lastPathComponent).joined(separator: "\n")
-        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let detail = label(urls.count == 1 ? "Ready to collect" : "Originals stay in Finder", size: 11, color: .secondaryLabelColor, wrapping: true)
-        let labels = NSStackView(views: [name, detail])
-        labels.orientation = .vertical
-        labels.alignment = .leading
-        labels.spacing = 4
-        labels.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        row.addArrangedSubview(labels)
-        labels.widthAnchor.constraint(equalTo: row.widthAnchor, constant: -CGFloat(min(3, urls.count) * 60)).isActive = true
-        name.widthAnchor.constraint(equalTo: labels.widthAnchor).isActive = true
-        detail.widthAnchor.constraint(equalTo: labels.widthAnchor).isActive = true
-        return surface(around: row)
     }
 }
 

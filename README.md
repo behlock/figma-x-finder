@@ -8,6 +8,8 @@ The app is a small native macOS Service with a destination picker. A tiny Figma 
 
 The Send panel uses a quiet, adaptive surface inspired by the [Neuralink interface reference](design/panel-reference.md): local file previews, softly inset controls, a circular blue Send arrow, and a checkmark after acknowledgement. Return sends, Escape closes, and the destination menu keeps its native keyboard behavior. Long names truncate, errors remain visible, and the window fits its content.
 
+Image previews follow nothing-id's marker-detail source strip: 96-pixel square thumbnails with 15-pixel corners and 8-pixel gaps. All selected images are available through horizontal scrolling, with a fading edge and an overlay scrollbar. Click a thumbnail to switch between expanded and 30-pixel compact previews. Filenames remain available as tooltips and accessibility labels. Square preview crops do not change the proportions of imported images.
+
 ## App outline
 
 - One macOS app, no menu bar utility or separate server installation.
