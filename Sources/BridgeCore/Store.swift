@@ -2,15 +2,15 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-public struct Destination: Codable, Equatable, Identifiable {
+public struct Destination: Codable, Equatable {
     public let id: String
     public var name: String
     public let fileKey: String
     public let pageID: String
     public let nodeID: String?
 
-    public init(id: String = UUID().uuidString, name: String, fileKey: String, pageID: String, nodeID: String?) {
-        self.id = id
+    public init(name: String, fileKey: String, pageID: String, nodeID: String?) {
+        id = UUID().uuidString
         self.name = name
         self.fileKey = fileKey
         self.pageID = pageID
@@ -25,15 +25,6 @@ public struct Destination: Codable, Equatable, Identifiable {
         fileKey = try values.decode(String.self, forKey: .fileKey)
         pageID = try values.decode(String.self, forKey: .pageID)
         nodeID = try values.decodeIfPresent(String.self, forKey: .nodeID)
-    }
-
-    public var url: URL {
-        var url = URLComponents()
-        url.scheme = "https"
-        url.host = "www.figma.com"
-        url.path = "/design/\(fileKey)"
-        url.queryItems = [URLQueryItem(name: "node-id", value: nodeID ?? pageID)]
-        return url.url!
     }
 
     public func validate() throws {
@@ -53,8 +44,6 @@ public enum BridgeError: LocalizedError {
 public struct QueuedImage: Codable {
     public let id: String
     public let name: String
-    public let width: Int
-    public let height: Int
 }
 
 public struct Job: Codable {
@@ -103,8 +92,7 @@ public final class Store {
         if let index = updated.destinations.firstIndex(where: {
             $0.fileKey == destination.fileKey && $0.pageID == destination.pageID && $0.nodeID == destination.nodeID
         }) {
-            let existing = updated.destinations[index]
-            updated.destinations[index] = Destination(id: existing.id, name: destination.name, fileKey: existing.fileKey, pageID: existing.pageID, nodeID: existing.nodeID)
+            updated.destinations[index].name = destination.name
         } else {
             // Registration never accepts an externally supplied local ID.
             updated.destinations.append(Destination(name: destination.name, fileKey: destination.fileKey, pageID: destination.pageID, nodeID: destination.nodeID))
@@ -113,7 +101,7 @@ public final class Store {
     }
 
     public func enqueue(_ urls: [URL], destination: Destination) throws -> EnqueueResult {
-        guard state.destinations.contains(where: { $0 == destination }) else {
+        guard state.destinations.contains(destination) else {
             throw BridgeError.message("This destination is no longer saved.")
         }
         guard urls.count <= 100 else { throw BridgeError.message("Send up to 100 images at a time.") }
@@ -127,8 +115,8 @@ public final class Store {
         for url in urls.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
             do {
                 let imageID = UUID().uuidString
-                let image = try prepareImage(url, to: folder.appendingPathComponent(imageID + ".png"))
-                images.append(QueuedImage(id: imageID, name: url.lastPathComponent, width: image.0, height: image.1))
+                try prepareImage(url, to: folder.appendingPathComponent(imageID + ".png"))
+                images.append(QueuedImage(id: imageID, name: url.lastPathComponent))
             } catch { skipped.append("\(url.lastPathComponent): \(error.localizedDescription)") }
         }
         guard !images.isEmpty else { throw BridgeError.message(skipped.joined(separator: "\n")) }
@@ -171,7 +159,7 @@ public final class Store {
         try persist(updated)
     }
 
-    private func prepareImage(_ url: URL, to output: URL) throws -> (Int, Int) {
+    private func prepareImage(_ url: URL, to output: URL) throws {
         guard url.isFileURL,
               let source = CGImageSourceCreateWithURL(url as CFURL, nil)
         else { throw BridgeError.message("Not a readable image.") }
@@ -195,15 +183,9 @@ public final class Store {
             guard data.length <= 10 * 1024 * 1024 else { continue }
             try (data as Data).write(to: output, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: output.path)
-            return (image.width, image.height)
+            return
         }
         throw BridgeError.message("Couldn’t fit the prepared image within 10 MB.")
-    }
-
-    public func remember(_ id: String) throws {
-        var updated = state
-        updated.lastDestinationID = id
-        try persist(updated)
     }
 
     private func persist(_ updated: State) throws {

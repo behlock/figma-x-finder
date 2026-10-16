@@ -52,6 +52,13 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertEqual(result.job.images[0].name, "reference image 日本.png")
     }
 
+    func testLegacyImageMetadataRemainsReadable() throws {
+        let data = Data(#"{"id":"image1","name":"reference.png","width":20,"height":10}"#.utf8)
+        let image = try JSONDecoder().decode(QueuedImage.self, from: data)
+        XCTAssertEqual(image.id, "image1")
+        XCTAssertEqual(image.name, "reference.png")
+    }
+
     func testAcknowledgementIsPersistentAndIdempotent() throws {
         let store = try store()
         let result = try store.enqueue([try image(), try image(name: "second.png")], destination: store.destinations[0])
@@ -71,7 +78,10 @@ final class BridgeCoreTests: XCTestCase {
         let result = try store.enqueue([large, directory.appendingPathComponent("missing.txt")], destination: store.destinations[0])
         XCTAssertEqual(result.skipped.count, 1)
         XCTAssertEqual(result.job.images.count, 1)
-        XCTAssertEqual(result.job.images[0].width, 4096)
+        let bytes = try store.imageData(jobID: result.job.id, imageID: result.job.images[0].id)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(bytes as CFData, nil))
+        let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(decoded.width, 4096)
     }
 
     func testRegistrationKeepsIdentityOnRename() throws {
@@ -94,10 +104,8 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertLessThanOrEqual(bytes.count, 10 * 1024 * 1024)
         let source = try XCTUnwrap(CGImageSourceCreateWithData(bytes as CFData, nil))
         let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
-        XCTAssertEqual(decoded.width, image.width)
-        XCTAssertEqual(decoded.height, image.height)
-        XCTAssertEqual(image.width, image.height)
-        XCTAssertLessThan(image.width, 2400)
+        XCTAssertEqual(decoded.width, decoded.height)
+        XCTAssertLessThan(decoded.width, 2400)
         XCTAssertEqual(try Data(contentsOf: original), originalBytes)
     }
 
@@ -112,5 +120,69 @@ final class BridgeCoreTests: XCTestCase {
         let valid = try XCTUnwrap(HTTPRequest.parse(Data("GET /v1/destinations HTTP/1.1\r\nAuthorization: Bearer \(store.token)\r\n\r\n".utf8)))
         XCTAssertEqual(router.handle(valid).status, 200)
         XCTAssertThrowsError(try HTTPRequest.parse(Data("POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n".utf8)))
+    }
+
+    private func pairingRequest(_ path: String, id: String? = nil) throws -> HTTPRequest {
+        HTTPRequest(method: "POST", url: URL(string: "http://localhost" + path)!,
+                    headers: ["content-type": "application/json"],
+                    body: try JSONEncoder().encode(id.map { ["id": $0] } ?? [:]))
+    }
+
+    func testPairingReleasesCredentialOnceAfterMatchingLocalApproval() throws {
+        let store = try store()
+        let router = Router(store: store)
+        var prompt: PairingRequest?
+        router.onPairingRequest = { prompt = $0 }
+        let start = router.handle(try pairingRequest("/v1/pairing/start"))
+        XCTAssertEqual(start.status, 200)
+        let request = try XCTUnwrap(prompt)
+        XCTAssertEqual(request.code.count, 6)
+        XCTAssertFalse(String(decoding: start.body, as: UTF8.self).contains(store.token))
+        XCTAssertEqual(router.handle(try pairingRequest("/v1/pairing/start")).status, 409)
+        XCTAssertEqual(router.handle(try pairingRequest("/v1/pairing/status", id: "wrong")).status, 404)
+        router.confirmPairing("wrong", allow: true)
+        let check = try pairingRequest("/v1/pairing/status", id: request.id)
+        let pending = router.handle(check)
+        XCTAssertEqual(pending.status, 202)
+        XCTAssertFalse(String(decoding: pending.body, as: UTF8.self).contains(store.token))
+        router.confirmPairing(request.id, allow: true)
+        let connected = router.handle(check)
+        XCTAssertEqual(connected.status, 200)
+        XCTAssertEqual(try JSONDecoder().decode([String: String].self, from: connected.body)["token"], store.token)
+        XCTAssertEqual(router.handle(check).status, 404)
+        // Approval never makes the image/destination API public.
+        let unauthenticated = HTTPRequest(method: "GET", url: URL(string: "http://localhost/v1/destinations")!, headers: [:], body: Data())
+        XCTAssertEqual(router.handle(unauthenticated).status, 401)
+    }
+
+    func testPairingDenialExpiryAndInvalidRequestsNeverReleaseCredential() throws {
+        let store = try store()
+        var time = Date()
+        let router = Router(store: store, now: { time })
+        var prompt: PairingRequest?
+        router.onPairingRequest = { prompt = $0 }
+        let invalid = HTTPRequest(method: "POST", url: URL(string: "http://localhost/v1/pairing/start")!, headers: [:], body: Data())
+        XCTAssertEqual(router.handle(invalid).status, 400)
+        XCTAssertNil(prompt)
+        _ = router.handle(try pairingRequest("/v1/pairing/start"))
+        let first = try XCTUnwrap(prompt)
+        router.confirmPairing(first.id, allow: false)
+        router.confirmPairing(first.id, allow: true) // A denial cannot be overwritten.
+        let denied = router.handle(try pairingRequest("/v1/pairing/status", id: first.id))
+        XCTAssertEqual(denied.status, 403)
+        XCTAssertFalse(String(decoding: denied.body, as: UTF8.self).contains(store.token))
+        XCTAssertEqual(router.handle(try pairingRequest("/v1/pairing/start")).status, 429)
+        time.addTimeInterval(11)
+        XCTAssertEqual(router.handle(try pairingRequest("/v1/pairing/start")).status, 200)
+        let second = try XCTUnwrap(prompt)
+        XCTAssertNotEqual(first.id, second.id)
+        time.addTimeInterval(121)
+        router.confirmPairing(second.id, allow: true)
+        let expired = router.handle(try pairingRequest("/v1/pairing/status", id: second.id))
+        XCTAssertEqual(expired.status, 410)
+        XCTAssertFalse(String(decoding: expired.body, as: UTF8.self).contains(store.token))
+        XCTAssertEqual(router.handle(try pairingRequest("/v1/pairing/start")).status, 200)
+        XCTAssertEqual(store.destinations.count, 1)
+        XCTAssertEqual(try Store(directory: store.directory).token, store.token)
     }
 }

@@ -3,37 +3,66 @@
 <meta charset="utf-8">
 <style>
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; padding: 20px; font: 12px/1.5 Inter, system-ui, sans-serif; color: var(--figma-color-text, #222); background: var(--figma-color-bg, #fff); }
-  h1 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
-  p { margin: 0 0 16px; color: var(--figma-color-text-secondary, #666); }
-  label { display: block; margin-bottom: 6px; }
-  input { width: 100%; padding: 8px; margin-bottom: 10px; color: inherit; background: var(--figma-color-bg-secondary, #f5f5f5); border: 1px solid var(--figma-color-border, #ddd); border-radius: 4px; }
-  button { padding: 8px 12px; border: 1px solid var(--figma-color-border, #ddd); border-radius: 4px; background: var(--figma-color-bg-secondary, #f5f5f5); color: inherit; cursor: pointer; }
+  h1 { margin: 0 0 8px; font-size: 17px; font-weight: 500; }
+  p { margin: 0 0 14px; color: var(--figma-color-text-secondary, #666); }
+  .surface { padding: 12px; margin: 14px 0; border: 1px solid var(--figma-color-border, #eee); border-radius: 20px; background: var(--figma-color-bg-secondary, #f5f5f5); }
+  label { display: block; margin-bottom: 8px; color: var(--figma-color-text-secondary, #666); }
+  input { width: 100%; padding: 10px 12px; margin-bottom: 12px; font: inherit; font-size: 17px; color: inherit; background: var(--figma-color-bg, #fff); border: 0; border-radius: 12px; }
+  button { font: inherit; color: inherit; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
-  #save { width: 100%; background: var(--figma-color-bg-brand, #0d63e5); color: var(--figma-color-text-onbrand, #fff); border: 0; }
+  button:focus-visible, input:focus-visible { outline: 2px solid #009fff; outline-offset: 3px; }
+  .action { display: flex; align-items: center; gap: 12px; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; }
+  .pill { flex: 1; padding: 9px 12px; font-size: 17px; border-radius: 12px; background: var(--figma-color-bg, #fff); }
+  .circle { flex: 0 0 44px; height: 44px; display: grid; place-items: center; border: 5px solid #009fff22; border-radius: 50%; background: #009fff; background-clip: padding-box; color: #fff; box-sizing: content-box; }
+  .circle svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  #pairing-code { margin: 12px 0 0; text-align: center; font-size: 26px; font-variant-numeric: tabular-nums; letter-spacing: 6px; }
+  #pairing-help { margin: 8px 0 0; }
+  #connected { display: flex; align-items: center; justify-content: space-between; color: var(--figma-color-text-secondary, #666); }
+  #reconnect { border: 0; padding: 4px; background: transparent; color: var(--figma-color-text-brand, #008cff); }
   #status { margin: 14px 0 0; overflow-wrap: anywhere; }
-  details { margin: 12px 0; }
-  summary { margin-bottom: 8px; cursor: pointer; }
+  .note { margin: 14px 0 0; }
 </style>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><path id="arrow" d="M5 19 19 5M5 5h14v14"/></defs></svg>
 <h1>Receive from Finder</h1>
-<p>Select a frame, or deselect everything to use this page. Keep this receiver open while collecting.</p>
-<label for="name">Destination name</label>
-<input id="name" maxlength="120" placeholder="Inspiration">
-<button id="save" disabled>Save destination</button>
-<details id="connection">
-  <summary>Connection</summary>
-  <label for="key">Connection key from the macOS app</label>
-  <input id="key" type="password" autocomplete="off" spellcheck="false">
-  <button id="connect">Connect</button>
-</details>
+<section id="connection" class="surface">
+  <button id="connect" class="action">
+    <span class="pill" id="connect-label">Connect to your Mac</span>
+    <span class="circle" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#arrow"/></svg></span>
+  </button>
+  <div id="pairing-code" hidden></div>
+  <p id="pairing-help">Open Figma Finder Bridge on your Mac, then click Connect.</p>
+</section>
+<div id="connected" hidden><span>Connected to your Mac</span><button id="reconnect">Reconnect</button></div>
+<section id="destination" class="surface" hidden>
+  <p>Select a frame, or deselect everything to use this page.</p>
+  <label for="name">Destination name</label>
+  <input id="name" maxlength="120" placeholder="Inspiration">
+  <button id="save" class="action" disabled>
+    <span class="pill">Save destination</span>
+    <span class="circle" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#arrow"/></svg></span>
+  </button>
+</section>
 <p id="status" role="status" aria-live="polite">Connecting…</p>
+<p class="note">Keep this plugin open while sending. Run it again after reopening Figma; your destinations stay saved.</p>
 <script>
   const endpoint = 'http://localhost:17847';
   const receiver = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const pending = new Map();
-  let sequence = 0, token = '', fileKey = null, busy = false, registered = false;
-  const status = document.getElementById('status');
-  const save = document.getElementById('save');
+  let sequence = 0, token = '', fileKey = null, busy = false, registered = false, connected = false, pairing = false;
+  const $ = id => document.getElementById(id);
+  const status = $('status'), save = $('save'), connect = $('connect');
+
+  if (typeof ResizeObserver !== 'undefined') {
+    let previousHeight = 0;
+    new ResizeObserver(() => {
+      const height = Math.ceil(document.body.getBoundingClientRect().height);
+      if (height === previousHeight) return;
+      previousHeight = height;
+      rpc('resize', { height }).catch(() => {});
+    }).observe(document.body);
+  }
 
   function rpc(type, payload = {}) {
     const requestID = ++sequence;
@@ -44,23 +73,39 @@
     });
   }
 
+  function showConnection(isConnected) {
+    connected = isConnected;
+    $('connection').hidden = isConnected;
+    $('connected').hidden = !isConnected;
+    $('destination').hidden = !isConnected;
+    save.disabled = !isConnected || !fileKey || busy;
+  }
+
+  function offline(error) { return error instanceof TypeError || error.name === 'TimeoutError'; }
+
+  async function pairingAPI(path, body = {}) { return (await api(path, body)).json(); }
+
   async function api(path, body) {
+    const isPairing = path.startsWith('/v1/pairing/');
     const response = await fetch(endpoint + path, {
       method: body === undefined ? 'GET' : 'POST',
-      headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      headers: { ...(!isPairing ? { Authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(10000)
     });
     if (!response.ok) {
-      if (response.status === 401) throw new Error('Connection key doesn’t match. Copy it from the macOS app again.');
+      if (response.status === 401) {
+        showConnection(false);
+        throw new Error('Please connect to your Mac again.');
+      }
       const detail = await response.json().catch(() => ({}));
-      throw new Error(detail.error || 'The local connection interrupted delivery. Retrying…');
+      throw new Error(detail.error || (isPairing ? 'Connection request ended. Click Connect to try again.' : 'The local connection interrupted delivery. Retrying…'));
     }
     return response;
   }
 
   async function poll() {
-    if (!token || !fileKey || busy) return;
+    if (!connected || !token || !fileKey || busy || pairing) return;
     busy = true;
     let job;
     try {
@@ -87,7 +132,8 @@
       status.textContent = `Added ${job.images.length} images to ${job.destination.name}.`;
       registered = true;
     } catch (error) {
-      status.textContent = error.message.includes('fetch') || error.name === 'TimeoutError'
+      save.disabled = true;
+      status.textContent = offline(error)
         ? 'Waiting for the macOS app. Choose Send to Figma in Finder, or open the app.' : error.message;
       if (job) await api('/v1/error', { jobID: job.id, message: status.textContent, receiver }).catch(() => {});
     } finally { busy = false; }
@@ -106,40 +152,67 @@
     }
   };
 
-  document.getElementById('connection').ontoggle = () => {
-    rpc('resize', { height: document.getElementById('connection').open ? 460 : 350 }).catch(() => {});
-  };
   rpc('bootstrap').then(configuration => {
     token = configuration.token;
     fileKey = configuration.fileKey;
-    document.getElementById('key').value = token;
-    document.getElementById('name').value = configuration.name;
-    document.getElementById('connection').open = !token;
-    if (!fileKey) status.textContent = 'Run this development plugin in a saved Design file with file identity access.';
-    else if (!token) status.textContent = 'Copy the connection key from the macOS app.';
+    $('name').value = configuration.name;
+    showConnection(Boolean(token));
+    if (!fileKey) status.textContent = 'Save this Figma Design file, then close and rerun the plugin.';
+    else if (!token) status.textContent = 'Connect once to get started.';
     else poll();
   }).catch(error => { status.textContent = error.message; });
 
-  document.getElementById('connect').onclick = async () => {
+  connect.onclick = async () => {
+    if (pairing || busy) return;
+    pairing = true;
+    connect.disabled = true;
+    $('connect-label').textContent = 'Waiting for approval…';
     try {
-      const result = await rpc('configure', { token: document.getElementById('key').value.trim() });
-      token = result.token;
+      const request = await pairingAPI('/v1/pairing/start');
+      $('pairing-code').textContent = request.code;
+      $('pairing-code').hidden = false;
+      $('pairing-help').textContent = 'Approve this matching code in the Mac app. No need to copy it.';
+      status.textContent = 'Waiting for you to approve the connection on your Mac…';
+      const deadline = Date.now() + 120000;
+      let result;
+      while (Date.now() < deadline) {
+        result = await pairingAPI('/v1/pairing/status', { id: request.id });
+        if (result.state === 'connected') break;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      if (result?.state !== 'connected') throw new Error('Connection request expired. Click Connect to try again.');
+      const configuration = await rpc('configure', { token: result.token });
+      token = configuration.token;
       registered = false;
-      await poll();
-    } catch (error) { status.textContent = error.message; }
+      showConnection(true);
+      status.textContent = fileKey ? 'Connected. Select a frame and save a destination.' : 'Save this Figma Design file, then close and rerun the plugin.';
+    } catch (error) {
+      status.textContent = offline(error) ? 'Open Figma Finder Bridge on your Mac, then click Connect to try again.' : error.message;
+    } finally {
+      pairing = false;
+      connect.disabled = false;
+      $('connect-label').textContent = 'Connect to your Mac';
+      $('pairing-code').hidden = true;
+      $('pairing-help').textContent = 'Open Figma Finder Bridge on your Mac, then click Connect.';
+    }
+    if (connected) await poll();
+  };
+  $('reconnect').onclick = () => {
+    if (busy || pairing) return;
+    showConnection(false);
+    status.textContent = 'Click Connect to connect to this Mac.';
   };
   save.onclick = async () => {
-    if (busy) return;
+    if (busy || pairing || !connected || !fileKey) return;
     busy = true;
     save.disabled = true;
     try {
-      const destination = await rpc('registration', { name: document.getElementById('name').value });
+      const destination = await rpc('registration', { name: $('name').value });
       await api('/v1/destinations', destination);
       registered = true;
       status.textContent = `Saved ${destination.name}. Ready for images from Finder.`;
-      document.getElementById('connection').open = false;
     } catch (error) { status.textContent = error.message; }
-    finally { busy = false; save.disabled = false; }
+    finally { busy = false; save.disabled = !connected || !fileKey; }
   };
   setInterval(poll, 2000);
 </script>

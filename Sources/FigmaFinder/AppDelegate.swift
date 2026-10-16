@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.server = LocalServer(store: store)
         super.init()
         server.onRequest = { [weak self] in self?.lastActivity = Date() }
+        server.router.onPairingRequest = { [weak self] request in self?.connectReceiver(request) }
         server.onFailure = { [weak self] message in
             self?.showError("Couldn’t start the local receiver connection", message: message)
         }
@@ -66,6 +67,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         picker?.close()
         let controller = PickerController(store: store, urls: urls)
         picker = controller
+        controller.onClose = {
+            NSApp.setActivationPolicy(.accessory)
+        }
+        NSApp.setActivationPolicy(.regular)
         controller.showWindow(nil)
         controller.window?.center()
         NSApp.activate(ignoringOtherApps: true)
@@ -76,5 +81,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = title
         alert.informativeText = message
         alert.runModal()
+    }
+
+    private func connectReceiver(_ request: PairingRequest) {
+        lastActivity = Date()
+        if picker?.window?.isVisible != true { showPicker([]) }
+        guard let window = picker?.window, window.attachedSheet == nil else {
+            server.router.confirmPairing(request.id, allow: false)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Connect to Figma?"
+        alert.informativeText = "Check that this code matches the one in the Figma plugin:\n\n\(request.code)\n\nOnly allow a connection you started. This lets the receiver access images you send and save destinations."
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            self?.server.router.confirmPairing(request.id, allow: response == .alertFirstButtonReturn)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 120) { [weak window, weak alert] in
+            guard let window, let alert, window.attachedSheet == alert.window else { return }
+            window.endSheet(alert.window, returnCode: .abort)
+        }
     }
 }

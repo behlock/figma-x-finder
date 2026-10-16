@@ -1,8 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
-export CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-cache"
-export SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/swift-cache"
+source "$(dirname "$0")/common.sh"
 swift scripts/stop-app.swift
 bash scripts/build-app.sh
 application_directory="${1:-$HOME/Applications}"

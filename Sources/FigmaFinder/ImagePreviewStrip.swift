@@ -2,17 +2,21 @@ import AppKit
 import ImageIO
 import QuartzCore
 
-/// Matches nothing-id's marker source strip: 96/30px tiles, 15/9px corners, 8px gaps.
 @MainActor
 final class ImagePreviewStrip: NSView {
     var onSizeChange: (() -> Void)?
+    var onRemove: ((Int) -> Void)?
+    var allowsRemoval = true {
+        didSet { tiles.forEach { $0.removeButton.isEnabled = allowsRemoval } }
+    }
     private let scroll = NSScrollView()
     private let row = NSStackView()
     private let fade = CAGradientLayer()
     private var tiles: [ImagePreviewTile] = []
     private var tileConstraints: [NSLayoutConstraint] = []
     private var stripHeight: NSLayoutConstraint!
-    private var expanded = true
+    private var expanded = false
+    private var side: CGFloat { expanded ? 192 : 96 }
 
     init(urls: [URL]) {
         super.init(frame: .zero)
@@ -43,8 +47,10 @@ final class ImagePreviewStrip: NSView {
         ])
         for url in urls {
             let tile = ImagePreviewTile(url: url)
-            tile.target = self
-            tile.action = #selector(toggleSize)
+            tile.previewButton.target = self
+            tile.previewButton.action = #selector(toggleSize)
+            tile.removeButton.target = self
+            tile.removeButton.action = #selector(removeImage(_:))
             row.addArrangedSubview(tile)
             tileConstraints += [tile.widthAnchor.constraint(equalToConstant: 96), tile.heightAnchor.constraint(equalToConstant: 96)]
             tiles.append(tile)
@@ -60,7 +66,6 @@ final class ImagePreviewStrip: NSView {
 
     override func layout() {
         super.layout()
-        let side: CGFloat = expanded ? 96 : 30
         row.setFrameSize(NSSize(width: CGFloat(tiles.count) * side + CGFloat(max(0, tiles.count - 1)) * 8, height: side))
         row.layoutSubtreeIfNeeded()
         updateFade()
@@ -68,7 +73,6 @@ final class ImagePreviewStrip: NSView {
 
     @objc private func toggleSize() {
         expanded.toggle()
-        let side: CGFloat = expanded ? 96 : 30
         tileConstraints.forEach { $0.constant = side }
         stripHeight.constant = side
         if !expanded { scroll.contentView.scroll(to: .zero) }
@@ -80,10 +84,23 @@ final class ImagePreviewStrip: NSView {
 
     private func updateTiles() {
         for tile in tiles {
-            tile.cornerRadius = expanded ? 15 : 9
-            tile.setAccessibilityHelp(expanded ? "Show compact image previews" : "Expand image previews")
-            tile.toolTip = tile.title + (expanded ? "\nClick for compact previews" : "\nClick to expand previews")
+            tile.previewButton.cornerRadius = expanded ? 24 : 15
+            tile.previewButton.setAccessibilityHelp(expanded ? "Return to default preview size" : "Enlarge image previews")
+            tile.previewButton.toolTip = tile.previewButton.title + (expanded ? "\nClick for default size" : "\nClick to enlarge")
         }
+    }
+
+    @objc private func removeImage(_ sender: NSButton) {
+        guard allowsRemoval, let index = tiles.firstIndex(where: { $0.removeButton === sender }) else { return }
+        let tile = tiles.remove(at: index)
+        row.removeArrangedSubview(tile)
+        tile.removeFromSuperview()
+        let constraints = Array(tileConstraints[(index * 2)..<(index * 2 + 2)])
+        NSLayoutConstraint.deactivate(constraints)
+        tileConstraints.removeSubrange((index * 2)..<(index * 2 + 2))
+        needsLayout = true
+        onRemove?(index)
+        onSizeChange?()
     }
 
     @objc private func scrolled() { updateFade() }
@@ -110,7 +127,36 @@ final class ImagePreviewStrip: NSView {
 }
 
 @MainActor
-private final class ImagePreviewTile: NSButton {
+private final class ImagePreviewTile: NSView {
+    let previewButton: ImagePreviewButton
+    let removeButton = PreviewRemoveButton(title: "", target: nil, action: nil)
+    init(url: URL) {
+        previewButton = ImagePreviewButton(url: url)
+        super.init(frame: .zero)
+        previewButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(previewButton)
+        removeButton.isBordered = false
+        removeButton.setAccessibilityLabel("Remove \(url.lastPathComponent)")
+        removeButton.toolTip = "Remove from this selection"
+        removeButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(removeButton)
+        NSLayoutConstraint.activate([
+            previewButton.leadingAnchor.constraint(equalTo: leadingAnchor),
+            previewButton.trailingAnchor.constraint(equalTo: trailingAnchor),
+            previewButton.topAnchor.constraint(equalTo: topAnchor),
+            previewButton.bottomAnchor.constraint(equalTo: bottomAnchor),
+            removeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            removeButton.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            removeButton.widthAnchor.constraint(equalToConstant: 22),
+            removeButton.heightAnchor.constraint(equalToConstant: 22)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+}
+
+@MainActor
+private final class ImagePreviewButton: PointingHandButton {
     var cornerRadius: CGFloat = 15 { didSet { needsDisplay = true } }
     private let thumbnail: NSImage?
 
@@ -119,7 +165,7 @@ private final class ImagePreviewTile: NSButton {
            let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 256
+            kCGImageSourceThumbnailMaxPixelSize: 512
            ] as CFDictionary) {
             thumbnail = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
         } else { thumbnail = nil }
@@ -128,10 +174,10 @@ private final class ImagePreviewTile: NSButton {
         isBordered = false
         setAccessibilityLabel(url.lastPathComponent)
         focusRingType = .exterior
+
     }
 
     required init?(coder: NSCoder) { nil }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
     override var focusRingMaskBounds: NSRect { bounds }
     override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: cornerRadius, yRadius: cornerRadius).fill() }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
@@ -160,5 +206,17 @@ private final class ImagePreviewTile: NSButton {
             ring.lineWidth = 2
             ring.stroke()
         }
+    }
+}
+
+@MainActor
+private final class PreviewRemoveButton: PointingHandButton {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.black.withAlphaComponent(isHighlighted ? 0.8 : 0.55).setFill()
+        NSBezierPath(ovalIn: bounds).fill()
+        NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold)
+                .applying(.init(paletteColors: [NSColor.white.withAlphaComponent(isEnabled ? 1 : 0.4)])))?
+            .draw(in: bounds.insetBy(dx: 6, dy: 6))
     }
 }

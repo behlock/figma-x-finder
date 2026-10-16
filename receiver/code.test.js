@@ -7,19 +7,9 @@ class Node {
   constructor(type, id) {
     this.type = type; this.id = id || `test:${++counter}`; this.name = type;
     this.children = []; this.data = {}; this.x = 0; this.y = 0;
-    this._width = 100; this._height = 100; this.rotation = 0;
+    this.width = 100; this.height = 100; this.rotation = 0;
     this.layoutMode = 'NONE'; this.locked = false; this.visible = true;
-    this.clipsContent = false; this.itemSpacing = 0;
-  }
-  get width() {
-    if (this.layoutMode === 'HORIZONTAL') return this.children.reduce((sum, node) => sum + node.width, 0) + Math.max(0, this.children.length - 1) * this.itemSpacing;
-    if (this.layoutMode === 'VERTICAL') return Math.max(0, ...this.children.map(node => node.width));
-    return this._width;
-  }
-  get height() {
-    if (this.layoutMode === 'VERTICAL') return this.children.reduce((sum, node) => sum + node.height, 0) + Math.max(0, this.children.length - 1) * this.itemSpacing;
-    if (this.layoutMode === 'HORIZONTAL') return Math.max(0, ...this.children.map(node => node.height));
-    return this._height;
+    this.clipsContent = false;
   }
   get relativeTransform() {
     const angle = this.rotation * Math.PI / 180;
@@ -34,7 +24,7 @@ class Node {
       a[row][0] * b[0][2] + a[row][1] * b[1][2] + a[row][2]
     ]);
   }
-  resize(width, height) { this._width = width; this._height = height; }
+  resize(width, height) { this.width = width; this.height = height; }
   appendChild(node) {
     if (node.parent) node.parent.children = node.parent.children.filter(child => child !== node);
     node.parent = this; this.children.push(node);
@@ -61,7 +51,6 @@ function setup() {
     root, currentPage: page, fileKey: 'file123',
     async getNodeByIdAsync(id) { return root.findOne(node => node.id === id); },
     async setCurrentPageAsync(value) { this.currentPage = value; },
-    createFrame() { const node = new Node('FRAME'); this.currentPage.appendChild(node); return node; },
     createRectangle() { const node = new Node('RECTANGLE'); this.currentPage.appendChild(node); return node; },
     createImage() { return { hash: 'image-hash', async getSizeAsync() { return { width: 200, height: 100 }; } }; },
     commitUndo() {}
@@ -88,7 +77,7 @@ test('mixed proportions spread into open space without moving existing content',
   const sizes = [{ width: 200, height: 100 }, { width: 100, height: 200 }, { width: 200, height: 200 }];
   figma.createImage = bytes => ({ hash: 'image-hash', async getSizeAsync() { return sizes[bytes[0] % sizes.length]; } });
   for (let index = 0; index < job.images.length; index++) await importImage(job, job.images[index].id, [index]);
-  const images = frame.children.filter(node => node.getPluginData('finderBatch') === job.id);
+  const images = frame.children.filter(node => node.getPluginData('finderImage').startsWith(`${job.id}.`));
   assert.equal(images.length, 10);
   assert.equal(old.x, 900); assert.equal(old.y, 800);
   assert.deepEqual([frame.width, frame.height], originalSize);

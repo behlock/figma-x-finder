@@ -1,11 +1,9 @@
 #!/bin/bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
-export CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-cache"
-export SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/swift-cache"
-options=(--disable-sandbox --cache-path "$PWD/.build/cache" --config-path "$PWD/.build/config" --security-path "$PWD/.build/security" -c release -debug-info-format none)
-swift build "${options[@]}"
-bin="$(swift build "${options[@]}" --show-bin-path)"
+source "$(dirname "$0")/common.sh"
+swift_options+=(-c release)
+swift build "${swift_options[@]}"
+bin="$(swift build "${swift_options[@]}" --show-bin-path)"
 app="$PWD/build/Figma Finder Bridge.app"
 if [ -d "$app" ]; then
     bundle_id="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Contents/Info.plist")"

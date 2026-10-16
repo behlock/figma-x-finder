@@ -1,4 +1,3 @@
-/* Classic development plugin; no MCP-specific API helpers are required. */
 function validateContainer(node) {
   if (!node || (node.type !== 'PAGE' && node.type !== 'FRAME')) {
     throw new Error('The saved destination was deleted. Register a new page or frame.');
@@ -146,9 +145,8 @@ async function importImage(job, imageID, bytes) {
   const { page, container } = await resolveDestination(job);
   const existing = existingImage(page, job, imageID);
   if (existing) return { nodeID: existing.id, reused: true };
-  const index = job.images.findIndex(image => image.id === imageID);
-  if (index < 0) throw new Error('Image not found in this batch.');
-  const metadata = job.images[index];
+  const metadata = job.images.find(image => image.id === imageID);
+  if (!metadata) throw new Error('Image not found in this batch.');
   const image = figma.createImage(new Uint8Array(bytes));
   const dimensions = await image.getSizeAsync();
   // Validate again after asynchronous decoding: the user may have changed the frame.
@@ -164,7 +162,6 @@ async function importImage(job, imageID, bytes) {
   container.appendChild(rectangle);
   rectangle.x = placement.x;
   rectangle.y = placement.y;
-  rectangle.setPluginData('finderBatch', job.id);
   rectangle.setPluginData('finderImage', itemKey(job, imageID));
   if (container.type === 'FRAME') {
     container.resize(Math.max(container.width, rectangle.x + rectangle.width + IMAGE_GAP),
@@ -179,10 +176,10 @@ async function handle(message) {
     case 'bootstrap':
       return { token: await figma.clientStorage.getAsync('connectionKey') || '', fileKey: figma.fileKey || null, name: figma.currentPage.selection[0]?.name || figma.currentPage.name };
     case 'resize':
-      figma.ui.resize(360, message.height === 460 ? 460 : 350);
+      figma.ui.resize(360, Math.max(350, Math.min(640, Number(message.height) || 420)));
       return {};
     case 'configure':
-      if (!/^[A-Fa-f0-9]{64}$/.test(message.token)) throw new Error('Copy the connection key from the macOS app.');
+      if (!/^[A-Fa-f0-9]{64}$/.test(message.token)) throw new Error('Connection failed. Click Connect to try again.');
       await figma.clientStorage.setAsync('connectionKey', message.token);
       return { token: message.token };
     case 'registration': {
@@ -210,7 +207,7 @@ async function handle(message) {
 }
 
 if (typeof figma !== 'undefined') {
-  figma.showUI(__html__, { width: 360, height: 350, themeColors: true });
+  figma.showUI(__html__, { width: 360, height: 420, themeColors: true });
   // Serialize mutations, including registration while a batch is arriving.
   let chain = Promise.resolve();
   figma.ui.onmessage = message => {
@@ -224,4 +221,4 @@ if (typeof figma !== 'undefined') {
   };
 }
 
-if (typeof module !== 'undefined') module.exports = { validateContainer, importImage, resolveDestination, boundsInContainer, occupiedBounds, findPlacement, overlaps, IMAGE_GAP };
+if (typeof module !== 'undefined') module.exports = { validateContainer, importImage, resolveDestination, boundsInContainer, occupiedBounds, overlaps, IMAGE_GAP };

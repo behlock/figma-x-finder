@@ -5,10 +5,9 @@ import BridgeCore
 @MainActor
 final class LocalServer {
     private var listener: NWListener?
-    private let router: Router
+    let router: Router
     var onRequest: (() -> Void)?
     var onFailure: ((String) -> Void)?
-
     init(store: Store) { router = Router(store: store) }
 
     func start() throws {

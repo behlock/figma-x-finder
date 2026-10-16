@@ -12,7 +12,7 @@
     <key>LSUIElement</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSServices</key><array><dict>
-        <key>NSMenuItem</key><dict><key>default</key><string>Send to Figma…</string></dict>
+        <key>NSMenuItem</key><dict><key>default</key><string>Send to Figma</string></dict>
         <key>NSMessage</key><string>sendToFigma</string>
         <key>NSPortName</key><string>Figma Finder Bridge</string>
         <key>NSRequiredContext</key><dict><key>NSApplicationIdentifier</key><string>com.apple.finder</string></dict>
