@@ -12,11 +12,7 @@ final class PickerController: NSWindowController, NSWindowDelegate {
     private let sendButton = CircularSendButton(title: "Send", target: nil, action: nil)
     private let stack = PickerController.column([], spacing: 14)
     private var destinationSurface: NSView?
-    private let setupSteps = PickerController.column([], spacing: 14)
-    private let setupToggle = NSButton(title: "Show setup instructions", target: nil, action: nil)
-    private let destinationLabel = PanelStyle.label("Saved destination", size: 12, color: .secondaryLabelColor)
-    private var setupExpanded = false
-    private var previouslyHadDestinations = false
+    private var setupSurface: NSView?
     private var preview: ImagePreviewStrip?
     private var timer: Timer?
     private var jobID: String?
@@ -43,27 +39,6 @@ final class PickerController: NSWindowController, NSWindowDelegate {
 
         stack.detachesHiddenViews = true
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let steps: [NSView] = [
-            PanelStyle.label("Connect Figma once, then send images from Finder.", color: .secondaryLabelColor, wrapping: true),
-            pluginStep(),
-            PanelStyle.surface(around: Self.column([
-                PanelStyle.label("2. Connect and save a destination", size: 17),
-                PanelStyle.label("In the plugin, click Connect and approve the matching code here. Select a frame, name it, and click Save destination. To use the whole page, deselect everything first.", size: 12, color: .secondaryLabelColor, wrapping: true)
-            ])),
-            PanelStyle.label("After reopening Figma, run the plugin again. Your destinations stay saved.", size: 12, color: .secondaryLabelColor, wrapping: true)
-        ]
-        for step in steps {
-            setupSteps.addArrangedSubview(step)
-            step.widthAnchor.constraint(equalTo: setupSteps.widthAnchor).isActive = true
-        }
-        setupToggle.target = self
-        setupToggle.action = #selector(toggleSetup)
-        setupToggle.isBordered = false
-        setupToggle.bezelStyle = .inline
-        setupToggle.font = .systemFont(ofSize: 12, weight: .medium)
-        setupToggle.contentTintColor = .secondaryLabelColor
-        setupToggle.alignment = .left
-        setupToggle.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
         if !urls.isEmpty {
             let preview = ImagePreviewStrip(urls: urls)
             self.preview = preview
@@ -76,6 +51,9 @@ final class PickerController: NSWindowController, NSWindowDelegate {
             }
             stack.addArrangedSubview(preview)
         }
+        let setupSurface = pluginStep()
+        self.setupSurface = setupSurface
+        stack.addArrangedSubview(setupSurface)
         destinations.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         destinations.onChange = { [weak self] in self?.sendError = nil; self?.refresh() }
         destinations.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -96,14 +74,11 @@ final class PickerController: NSWindowController, NSWindowDelegate {
         }
         let destinationSurface = PanelStyle.surface(around: destinationRow)
         self.destinationSurface = destinationSurface
-        if isSetup { stack.addArrangedSubview(destinationLabel) }
         stack.addArrangedSubview(destinationSurface)
         status.font = .systemFont(ofSize: 12)
         status.textColor = .secondaryLabelColor
         status.setContentCompressionResistancePriority(.required, for: .vertical)
         stack.addArrangedSubview(status)
-        if isSetup { stack.addArrangedSubview(setupToggle) }
-        stack.addArrangedSubview(setupSteps)
 
         window.contentView!.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -127,39 +102,37 @@ final class PickerController: NSWindowController, NSWindowDelegate {
         return group
     }
 
-    @objc private func toggleSetup() {
-        setupExpanded.toggle()
-        sendError = nil
-        refresh()
-    }
-
     private func pluginStep() -> NSView {
-        let action = #selector(revealPlugin)
-        let button = CircularSendButton(title: "Show plugin file", target: self, action: action)
-        button.toolTip = "Show manifest.json to add the plugin to Figma once"
-        button.setAccessibilityLabel("Show plugin file")
-        button.isBordered = false
-        button.focusRingType = .exterior
-        let pill = PanelPillButton(frame: .zero)
-        pill.title = "1. Add the plugin"
-        pill.target = self
-        pill.action = action
-        pill.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        pill.setAccessibilityLabel("Show plugin file")
-        pill.toolTip = button.toolTip
-        let row = NSStackView(views: [pill, button])
-        row.alignment = .centerY
-        row.spacing = 12
-        NSLayoutConstraint.activate([
-            pill.heightAnchor.constraint(equalToConstant: 38),
-            pill.widthAnchor.constraint(equalTo: row.widthAnchor, constant: -66),
-            button.widthAnchor.constraint(equalToConstant: 54),
-            button.heightAnchor.constraint(equalToConstant: 54)
-        ])
-        return PanelStyle.surface(around: Self.column([
-            row,
-            PanelStyle.label("Click above to show the plugin file. In Figma Desktop, choose Plugins → Development → Import plugin from manifest… and select manifest.json. Then run Figma Finder Bridge from the same menu.", size: 12, color: .secondaryLabelColor, wrapping: true)
-        ]))
+        let button = PanelPillButton(frame: .zero)
+        button.title = "Show manifest…"
+        button.target = self
+        button.action = #selector(revealPlugin)
+        button.contentTintColor = .systemBlue
+        button.toolTip = "Show manifest.json"
+        button.heightAnchor.constraint(equalToConstant: 38).isActive = true
+        let steps = ["Import Figma Plugin", "Run Figma Finder Bridge"]
+        let rows = steps.enumerated().map { index, step -> NSView in
+            let number = PanelStyle.label("\(index + 1)", size: 14, color: .secondaryLabelColor)
+            number.widthAnchor.constraint(equalToConstant: 20).isActive = true
+            let title = PanelStyle.label(step, size: 14)
+            title.font = .systemFont(ofSize: 14, weight: .medium)
+            let content = Self.column([title], spacing: 4)
+            if index == 0 {
+                let description = PanelStyle.label("Plugins › Development › Import plugin from manifest", size: 12, color: .secondaryLabelColor, wrapping: true)
+                content.addArrangedSubview(description)
+                description.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+                let surface = PanelStyle.surface(around: button)
+                content.addArrangedSubview(surface)
+                surface.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+                content.setCustomSpacing(12, after: description)
+            }
+            let row = NSStackView(views: [number, content])
+            row.alignment = .top
+            row.spacing = 8
+            content.widthAnchor.constraint(equalTo: row.widthAnchor, constant: -28).isActive = true
+            return row
+        }
+        return Self.column(rows, spacing: 20)
     }
 
     private func fitWindow(animated: Bool = false) {
@@ -189,14 +162,8 @@ final class PickerController: NSWindowController, NSWindowDelegate {
     private func refresh() {
         let saved = store.destinations
         destinations.update(saved, rememberedID: store.lastDestinationID)
-        if !saved.isEmpty && !previouslyHadDestinations { setupExpanded = false }
-        previouslyHadDestinations = !saved.isEmpty
-        let showingSetup = saved.isEmpty || (isSetup && setupExpanded)
-        setupSteps.isHidden = !showingSetup
-        setupToggle.isHidden = saved.isEmpty
-        setupToggle.title = showingSetup ? "Back to sending" : "Show setup instructions"
-        destinationLabel.isHidden = showingSetup
-        destinationSurface?.isHidden = showingSetup
+        setupSurface?.isHidden = !isSetup && !saved.isEmpty
+        destinationSurface?.isHidden = isSetup || saved.isEmpty
         destinations.isEnabled = !saved.isEmpty && jobID == nil
         preview?.allowsRemoval = jobID == nil
         sendButton.isEnabled = !urls.isEmpty && selected != nil && jobID == nil
@@ -217,15 +184,7 @@ final class PickerController: NSWindowController, NSWindowDelegate {
         } else if let sendError {
             status.stringValue = sendError
             status.textColor = .systemRed
-        } else if isSetup {
-            let pending = store.jobs.reduce(0) { $0 + $1.images.count - $1.completed.count }
-            if pending > 0 && !setupExpanded {
-                status.stringValue = "\(pending) image\(pending == 1 ? "" : "s") waiting for Figma.\nOpen the destination file in Figma and run Figma Finder Bridge to add them."
-            } else {
-                status.stringValue = saved.isEmpty || setupExpanded ? "" :
-                    "1. Open the destination file in Figma and run Figma Finder Bridge.\n2. In Finder, select images → Services → Send to Figma.\n3. Choose a destination and click ↗ to send."
-            }
-        } else if urls.isEmpty {
+        } else if !isSetup && urls.isEmpty {
             status.stringValue = "No images selected. Choose images in Finder to send."
         }
         status.isHidden = status.stringValue.isEmpty

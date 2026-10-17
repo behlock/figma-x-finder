@@ -122,7 +122,7 @@ class PanelPillButton: PointingHandButton {
         (isHighlighted ? NSColor.quaternaryLabelColor : PanelStyle.background).setFill()
         shape.fill()
         PanelStyle.drawTitle(title, in: bounds.insetBy(dx: 12, dy: 0), font: font ?? .systemFont(ofSize: 17),
-                             color: isEnabled ? .labelColor : .secondaryLabelColor)
+                             color: isEnabled ? (contentTintColor ?? .labelColor) : .secondaryLabelColor)
     }
 }
 
