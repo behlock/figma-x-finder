@@ -1,4 +1,4 @@
-# Figma Finder Bridge
+# Figma x Finder
 
 Right-click images in Finder and choose **Send to Figma** to send them to a saved Figma page or frame.
 

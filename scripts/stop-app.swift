@@ -7,6 +7,6 @@ while copies.contains(where: { !$0.isTerminated }), Date() < deadline {
     RunLoop.current.run(until: Date().addingTimeInterval(0.05))
 }
 guard copies.allSatisfy(\.isTerminated) else {
-    fputs("Quit Figma Finder Bridge before installing the update.\n", stderr)
+    fputs("Quit Figma x Finder before installing the update.\n", stderr)
     exit(1)
 }

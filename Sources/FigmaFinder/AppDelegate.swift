@@ -67,10 +67,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         picker?.close()
         let controller = PickerController(store: store, urls: urls)
         picker = controller
-        controller.onClose = {
-            NSApp.setActivationPolicy(.accessory)
-        }
-        NSApp.setActivationPolicy(.regular)
         controller.showWindow(nil)
         controller.window?.center()
         NSApp.activate(ignoringOtherApps: true)

@@ -22,10 +22,8 @@ final class ImagePreviewStrip: NSView {
         super.init(frame: .zero)
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
-        scroll.hasHorizontalScroller = true
+        scroll.hasHorizontalScroller = false
         scroll.hasVerticalScroller = false
-        scroll.scrollerStyle = .overlay
-        scroll.autohidesScrollers = true
         scroll.horizontalScrollElasticity = .allowed
         scroll.verticalScrollElasticity = .none
         scroll.automaticallyAdjustsContentInsets = false
@@ -136,6 +134,7 @@ private final class ImagePreviewTile: NSView {
         previewButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(previewButton)
         removeButton.isBordered = false
+        removeButton.isHidden = true
         removeButton.setAccessibilityLabel("Remove \(url.lastPathComponent)")
         removeButton.toolTip = "Remove from this selection"
         removeButton.translatesAutoresizingMaskIntoConstraints = false
@@ -153,6 +152,16 @@ private final class ImagePreviewTile: NSView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+        removeButton.isHidden = window.map { !visibleRect.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? true
+    }
+
+    override func mouseEntered(with event: NSEvent) { removeButton.isHidden = false }
+    override func mouseExited(with event: NSEvent) { removeButton.isHidden = true }
 }
 
 @MainActor

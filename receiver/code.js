@@ -2,18 +2,9 @@ function validateContainer(node) {
   if (!node || (node.type !== 'PAGE' && node.type !== 'FRAME')) {
     throw new Error('The saved destination was deleted. Register a new page or frame.');
   }
-  if (node.type === 'FRAME' && (node.layoutMode !== 'NONE' || Math.abs(node.rotation) > 0.01)) {
-    throw new Error('Choose a freeform, unrotated inspiration frame.');
-  }
   for (let ancestor = node; ancestor && ancestor.type !== 'DOCUMENT'; ancestor = ancestor.parent) {
     if (ancestor.locked || ancestor.visible === false || ancestor.type === 'INSTANCE' || ancestor.type === 'COMPONENT') {
       throw new Error('Choose a visible, unlocked page or frame outside a component.');
-    }
-    if (ancestor !== node && ancestor.type === 'FRAME' && ancestor.clipsContent) {
-      throw new Error('Choose a frame outside a clipping parent so new images remain visible.');
-    }
-    if (ancestor !== node && ancestor.type === 'FRAME' && ancestor.layoutMode !== 'NONE') {
-      throw new Error('Choose a frame outside an auto-layout parent so existing content stays in place.');
     }
   }
 }
@@ -22,16 +13,17 @@ async function resolveDestination(job) {
   if (!figma.fileKey || job.destination.fileKey !== figma.fileKey) {
     throw new Error('This batch belongs to another Figma file.');
   }
-  const page = await figma.getNodeByIdAsync(job.destination.pageID);
-  if (!page || page.type !== 'PAGE' || page.parent !== figma.root) {
+  const container = await figma.getNodeByIdAsync(job.destination.nodeID || job.destination.pageID);
+  if (container?.type !== (job.destination.nodeID ? 'FRAME' : 'PAGE')) {
+    throw new Error('The saved destination was deleted. Register a new page or frame.');
+  }
+  validateContainer(container);
+  let page = container;
+  while (page && page.type !== 'PAGE') page = page.parent;
+  if (!page || page.parent !== figma.root) {
     throw new Error('The saved page was deleted. Register a new destination.');
   }
   await figma.setCurrentPageAsync(page);
-  const container = job.destination.nodeID ? await figma.getNodeByIdAsync(job.destination.nodeID) : page;
-  validateContainer(container);
-  let ancestor = container;
-  while (ancestor && ancestor.type !== 'PAGE') ancestor = ancestor.parent;
-  if (ancestor !== page) throw new Error('The destination moved to another page. Register it again.');
   return { page, container };
 }
 
@@ -141,6 +133,14 @@ function existingImage(page, job, imageID) {
   return page.findOne(node => node.getPluginData('finderImage') === itemKey(job, imageID));
 }
 
+function growFrame(frame, width, height) {
+  if (width <= frame.width && height <= frame.height) return;
+  const horizontal = frame.layoutSizingHorizontal, vertical = frame.layoutSizingVertical;
+  frame.resizeWithoutConstraints(Math.max(frame.width, width), Math.max(frame.height, height));
+  frame.layoutSizingHorizontal = horizontal;
+  frame.layoutSizingVertical = vertical;
+}
+
 async function importImage(job, imageID, bytes) {
   const { page, container } = await resolveDestination(job);
   const existing = existingImage(page, job, imageID);
@@ -151,22 +151,31 @@ async function importImage(job, imageID, bytes) {
   const dimensions = await image.getSizeAsync();
   // Validate again after asynchronous decoding: the user may have changed the frame.
   validateContainer(container);
-  const availableWidth = container.type === 'FRAME' ? Math.max(40, container.width - 2 * IMAGE_GAP) : 320;
+  const autoLayout = container.type === 'FRAME' && container.layoutMode !== 'NONE';
+  const inset = autoLayout ? container.paddingLeft + container.paddingRight : 2 * IMAGE_GAP;
+  const availableWidth = container.type === 'FRAME' ? Math.max(40, container.width - inset) : 320;
   const displayWidth = Math.min(320, availableWidth);
   const displayHeight = Math.max(1, displayWidth * dimensions.height / dimensions.width);
-  const placement = findPlacement(container, displayWidth, displayHeight);
+  const placement = autoLayout ? null : findPlacement(container, displayWidth, displayHeight);
   const rectangle = figma.createRectangle();
-  rectangle.name = metadata.name;
-  rectangle.resize(displayWidth, displayHeight);
-  rectangle.fills = [{ type: 'IMAGE', imageHash: image.hash, scaleMode: 'FIT' }];
-  container.appendChild(rectangle);
-  rectangle.x = placement.x;
-  rectangle.y = placement.y;
-  rectangle.setPluginData('finderImage', itemKey(job, imageID));
-  if (container.type === 'FRAME') {
-    container.resize(Math.max(container.width, rectangle.x + rectangle.width + IMAGE_GAP),
-      Math.max(container.height, rectangle.y + rectangle.height + IMAGE_GAP));
-  }
+  try {
+    rectangle.name = metadata.name;
+    rectangle.resize(displayWidth, displayHeight);
+    rectangle.fills = [{ type: 'IMAGE', imageHash: image.hash, scaleMode: 'FIT' }];
+    container.appendChild(rectangle);
+    rectangle.rotation = 0;
+    if (placement) { rectangle.x = placement.x; rectangle.y = placement.y; }
+    if (autoLayout) {
+      const bounds = container.children.filter(node => node.visible && node.layoutPositioning !== 'ABSOLUTE')
+        .map(node => boundsInContainer(node, container));
+      growFrame(container,
+        Math.max(...bounds.map(b => b.x + b.width)) - Math.min(container.paddingLeft, ...bounds.map(b => b.x)) + container.paddingLeft + container.paddingRight,
+        Math.max(...bounds.map(b => b.y + b.height)) - Math.min(container.paddingTop, ...bounds.map(b => b.y)) + container.paddingTop + container.paddingBottom);
+    } else if (container.type === 'FRAME') {
+      growFrame(container, rectangle.x + rectangle.width + IMAGE_GAP, rectangle.y + rectangle.height + IMAGE_GAP);
+    }
+    rectangle.setPluginData('finderImage', itemKey(job, imageID));
+  } catch (error) { rectangle.remove(); throw error; }
   figma.commitUndo();
   return { nodeID: rectangle.id, reused: false };
 }
@@ -176,7 +185,7 @@ async function handle(message) {
     case 'bootstrap':
       return { token: await figma.clientStorage.getAsync('connectionKey') || '', fileKey: figma.fileKey || null, name: figma.currentPage.selection[0]?.name || figma.currentPage.name };
     case 'resize':
-      figma.ui.resize(360, Math.max(350, Math.min(640, Number(message.height) || 420)));
+      figma.ui.resize(360, Math.max(82, Math.min(640, Number(message.height) || 82)));
       return {};
     case 'configure':
       if (!/^[A-Fa-f0-9]{64}$/.test(message.token)) throw new Error('Connection failed. Click Connect to try again.');
@@ -186,7 +195,7 @@ async function handle(message) {
       if (!figma.fileKey) throw new Error('Figma has not exposed this file’s identity. Run this as a local development plugin in a saved Design file.');
       const selection = figma.currentPage.selection;
       if (selection.length > 1 || (selection.length === 1 && selection[0].type !== 'FRAME')) {
-        throw new Error('Select one inspiration frame, or deselect everything to use this page.');
+        throw new Error('Select a frame, or deselect everything to use this page.');
       }
       const container = selection[0] || figma.currentPage;
       validateContainer(container);
@@ -207,7 +216,7 @@ async function handle(message) {
 }
 
 if (typeof figma !== 'undefined') {
-  figma.showUI(__html__, { width: 360, height: 420, themeColors: true });
+  figma.showUI(__html__, { width: 360, height: 82, themeColors: true });
   // Serialize mutations, including registration while a batch is arriving.
   let chain = Promise.resolve();
   figma.ui.onmessage = message => {

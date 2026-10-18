@@ -19,7 +19,7 @@ enum Application {
             withExtendedLifetime(delegate) { app.run() }
         } catch {
             let alert = NSAlert()
-            alert.messageText = "Couldn’t open Figma Finder Bridge"
+            alert.messageText = "Couldn’t open Figma x Finder"
             alert.informativeText = error.localizedDescription
             alert.runModal()
         }
@@ -37,7 +37,7 @@ enum Application {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         }
         guard copies.allSatisfy(\.isTerminated) else {
-            throw BridgeError.message("Another copy is still running. Quit Figma Finder Bridge and open the installed app again. Queued images are retained.")
+            throw BridgeError.message("Another copy is still running. Quit Figma x Finder and open the installed app again. Queued images are retained.")
         }
     }
 }

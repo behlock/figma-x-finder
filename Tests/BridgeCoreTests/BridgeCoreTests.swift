@@ -91,6 +91,72 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertEqual(store.destinations.count, 1)
         XCTAssertEqual(store.destinations[0].id, id)
         XCTAssertThrowsError(try store.save(Destination(name: "Bad", fileKey: "../bad", pageID: "0:1", nodeID: nil)))
+        try store.save(Destination(name: "Moved frame", fileKey: "file123", pageID: "0:2", nodeID: "1:2"))
+        XCTAssertEqual(store.destinations.count, 1)
+        XCTAssertEqual(store.destinations[0].id, id)
+        XCTAssertEqual(store.destinations[0].pageID, "0:2")
+        try store.save(Destination(name: "Moved frame", fileKey: "file123", pageID: "0:2", nodeID: "1:3"))
+        try store.save(Destination(name: "Moved frame", fileKey: "file456", pageID: "0:2", nodeID: "1:2"))
+        try store.save(Destination(name: "Moved frame", fileKey: "file123", pageID: "0:2", nodeID: nil))
+        XCTAssertEqual(store.destinations.count, 4)
+    }
+
+    func testExistingDuplicateFramesAreConsolidatedWithoutLosingSelection() throws {
+        let store = try store()
+        let original = store.destinations[0]
+        let duplicate = Destination(name: "Updated", fileKey: original.fileKey, pageID: "0:2", nodeID: original.nodeID)
+        let page = Destination(name: "Updated", fileKey: original.fileKey, pageID: duplicate.pageID, nodeID: nil)
+        let url = store.directory.appendingPathComponent("state.json")
+        var state = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        state["destinations"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode([original, duplicate, page]))
+        state["lastDestinationID"] = duplicate.id
+        try JSONSerialization.data(withJSONObject: state).write(to: url)
+        let reopened = try Store(directory: store.directory)
+        XCTAssertEqual(reopened.destinations.count, 2)
+        XCTAssertEqual(reopened.destinations[0].id, original.id)
+        XCTAssertEqual(reopened.destinations[0].name, duplicate.name)
+        XCTAssertEqual(reopened.destinations[0].pageID, duplicate.pageID)
+        XCTAssertEqual(reopened.lastDestinationID, original.id)
+        XCTAssertEqual(reopened.destinations[1], page)
+        XCTAssertEqual(try Store(directory: store.directory).destinations, reopened.destinations)
+    }
+
+    func testUndoRegistrationRestoresNamesAndPreservesQueuedImages() throws {
+        let store = try store()
+        let original = store.destinations[0]
+        let rename = try store.save(Destination(name: "Renamed", fileKey: original.fileKey, pageID: original.pageID, nodeID: original.nodeID))
+        let reopened = try Store(directory: store.directory)
+        try reopened.undo(rename)
+        XCTAssertEqual(reopened.destinations, [original])
+        XCTAssertThrowsError(try reopened.undo(rename))
+        let creation = try reopened.save(Destination(name: "New", fileKey: "anotherFile", pageID: "0:1", nodeID: nil))
+        let queued = try reopened.enqueue([try image()], destination: creation.destination)
+        try reopened.undo(creation)
+        XCTAssertEqual(reopened.destinations, [original])
+        XCTAssertNil(reopened.lastDestinationID)
+        XCTAssertEqual(reopened.jobs.first?.id, queued.job.id)
+        XCTAssertFalse(try reopened.imageData(jobID: queued.job.id, imageID: queued.job.images[0].id).isEmpty)
+        XCTAssertEqual(try Store(directory: store.directory).destinations, [original])
+    }
+
+    func testUndoRouteRequiresAuthenticationAndRejectsChangedDestinations() throws {
+        let store = try store()
+        let router = Router(store: store)
+        func request(_ path: String, body: Data, authorized: Bool = true) -> HTTPRequest {
+            HTTPRequest(method: "POST", url: URL(string: "http://localhost" + path)!,
+                        headers: authorized ? ["authorization": "Bearer " + store.token] : [:], body: body)
+        }
+        let destination = Destination(name: "Renamed", fileKey: "file123", pageID: "0:1", nodeID: "1:2")
+        let saved = router.handle(request("/v1/destinations", body: try JSONEncoder().encode(destination)))
+        XCTAssertEqual(saved.status, 200)
+        let change = try JSONDecoder().decode(DestinationChange.self, from: saved.body)
+        let body = try JSONEncoder().encode(change)
+        XCTAssertEqual(router.handle(request("/v1/destinations/undo", body: body, authorized: false)).status, 401)
+        XCTAssertEqual(router.handle(request("/v1/destinations/undo", body: body)).status, 204)
+        XCTAssertEqual(store.destinations[0].name, "Inspiration")
+        let newer = try store.save(Destination(name: "Other edit", fileKey: destination.fileKey, pageID: destination.pageID, nodeID: destination.nodeID))
+        XCTAssertEqual(router.handle(request("/v1/destinations/undo", body: body)).status, 400)
+        XCTAssertEqual(store.destinations[0], newer.destination)
     }
 
     func testDetailedImageIsResizedToFitByteBudgetWithoutChangingOriginal() throws {

@@ -12,7 +12,7 @@ final class DestinationPicker: PanelPillButton {
     init() {
         super.init(frame: .zero)
         setAccessibilityLabel("Figma destination")
-        toolTip = "Choose or search destinations"
+        toolTip = "Choose a destination"
         target = self
         action = #selector(openChoices)
         popover.behavior = .transient
@@ -49,7 +49,7 @@ final class DestinationPicker: PanelPillButton {
     }
 
     private func updateTitle() {
-        title = options.first(where: { $0.id == selectedID })?.name ?? "No saved destinations"
+        title = options.first(where: { $0.id == selectedID })?.pickerTitle ?? "No saved destinations"
         setAccessibilityValue(title)
         needsDisplay = true
     }
@@ -57,33 +57,25 @@ final class DestinationPicker: PanelPillButton {
     @objc private func openChoices() {
         guard isEnabled else { return }
         if popover.isShown { popover.close(); return }
-        choices.update(options, selectedID: selectedID, resetSearch: true)
+        choices.update(options, selectedID: selectedID)
         popover.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
-        choices.focusSearch()
+        choices.focusChoices()
     }
 
 }
 
 @MainActor
-private final class DestinationChoicesController: NSViewController, NSSearchFieldDelegate {
+private final class DestinationChoicesController: NSViewController {
     var onSelect: ((String) -> Void)?
     var onCancel: (() -> Void)?
-    private let search = NSSearchField()
     private let scroll = NSScrollView()
     private let rows = NSStackView()
     private var options: [Destination] = []
-    private var filtered: [Destination] = []
-    private var selectedID: String?
     private var highlightedIndex = 0
     private var buttons: [DestinationOptionButton] = []
 
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
-        search.placeholderString = "Search destinations"
-        search.setAccessibilityLabel("Search destinations")
-        search.delegate = self
-        search.sendsSearchStringImmediately = true
-        search.translatesAutoresizingMaskIntoConstraints = false
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -92,45 +84,30 @@ private final class DestinationChoicesController: NSViewController, NSSearchFiel
         rows.alignment = .leading
         rows.spacing = 2
         scroll.documentView = rows
-        view.addSubview(search)
         view.addSubview(scroll)
         NSLayoutConstraint.activate([
-            search.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
-            search.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            search.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            scroll.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 10),
+            scroll.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
             scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8)
         ])
     }
 
-    func update(_ destinations: [Destination], selectedID: String?, resetSearch: Bool = false) {
+    func update(_ destinations: [Destination], selectedID: String?) {
         _ = view
         options = destinations
-        self.selectedID = selectedID
-        if resetSearch { search.stringValue = "" }
-        rebuild()
-    }
-
-    func focusSearch() { view.window?.makeFirstResponder(search) }
-    func controlTextDidChange(_ obj: Notification) { rebuild() }
-
-    private func rebuild() {
-        let query = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        filtered = options.filter { query.isEmpty || $0.name.localizedStandardContains(query) }
-        highlightedIndex = filtered.firstIndex(where: { $0.id == selectedID }) ?? 0
+        highlightedIndex = options.firstIndex(where: { $0.id == selectedID }) ?? 0
         for row in rows.arrangedSubviews { rows.removeArrangedSubview(row); row.removeFromSuperview() }
         buttons = []
-        for (index, option) in filtered.enumerated() {
-            let button = DestinationOptionButton(title: option.name, target: self, action: #selector(choose(_:)))
+        for (index, option) in options.enumerated() {
+            let button = DestinationOptionButton(title: option.pickerTitle, target: self, action: #selector(choose(_:)))
             button.tag = index
             button.isBordered = false
             button.font = .systemFont(ofSize: 14)
             button.alignment = .left
             button.isCurrent = option.id == selectedID
-            button.setAccessibilityLabel(option.name + (button.isCurrent ? ", selected" : ""))
-            button.toolTip = option.name
+            button.setAccessibilityLabel(option.pickerTitle + (button.isCurrent ? ", selected" : ""))
+            button.toolTip = option.pickerTitle
             rows.addArrangedSubview(button)
             NSLayoutConstraint.activate([
                 button.widthAnchor.constraint(equalToConstant: 304),
@@ -138,16 +115,20 @@ private final class DestinationChoicesController: NSViewController, NSSearchFiel
             ])
             buttons.append(button)
         }
-        if filtered.isEmpty {
-            let empty = PanelStyle.label("No matching destinations", color: .secondaryLabelColor)
+        if options.isEmpty {
+            let empty = PanelStyle.label("No saved destinations", color: .secondaryLabelColor)
             rows.addArrangedSubview(empty)
             empty.heightAnchor.constraint(equalToConstant: 36).isActive = true
         }
-        let rowHeight = CGFloat(max(1, filtered.count)) * 38
+        let rowHeight = CGFloat(max(1, options.count)) * 38
         rows.setFrameSize(NSSize(width: 304, height: rowHeight))
-        preferredContentSize = NSSize(width: 320, height: min(280, rowHeight) + 54)
+        preferredContentSize = NSSize(width: 320, height: min(280, rowHeight) + 16)
         highlight()
     }
+
+    func focusChoices() { view.window?.makeFirstResponder(self) }
+    override var acceptsFirstResponder: Bool { true }
+    override func keyDown(with event: NSEvent) { interpretKeyEvents([event]) }
 
     private func highlight() {
         for (index, button) in buttons.enumerated() {
@@ -160,33 +141,35 @@ private final class DestinationChoicesController: NSViewController, NSSearchFiel
     }
 
     @objc private func choose(_ sender: NSButton) {
-        guard filtered.indices.contains(sender.tag) else { return }
-        onSelect?(filtered[sender.tag].id)
+        guard options.indices.contains(sender.tag) else { return }
+        onSelect?(options[sender.tag].id)
     }
 
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        switch commandSelector {
-        case #selector(NSResponder.moveDown(_:)):
-            highlightedIndex = min(max(0, filtered.count - 1), highlightedIndex + 1)
-            highlight()
-        case #selector(NSResponder.moveUp(_:)):
-            highlightedIndex = max(0, highlightedIndex - 1)
-            highlight()
-        case #selector(NSResponder.insertNewline(_:)):
-            if filtered.indices.contains(highlightedIndex) { onSelect?(filtered[highlightedIndex].id) }
-        case #selector(NSResponder.cancelOperation(_:)):
-            onCancel?()
-        default: return false
-        }
-        return true
+    override func moveDown(_ sender: Any?) {
+        highlightedIndex = min(max(0, options.count - 1), highlightedIndex + 1)
+        highlight()
     }
+
+    override func moveUp(_ sender: Any?) {
+        highlightedIndex = max(0, highlightedIndex - 1)
+        highlight()
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        if options.indices.contains(highlightedIndex) { onSelect?(options[highlightedIndex].id) }
+    }
+
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
+}
+
+private extension Destination {
+    var pickerTitle: String { nodeID == nil ? "\(name) (page)" : name }
 }
 
 @MainActor
-private final class DestinationOptionButton: NSButton {
+private final class DestinationOptionButton: PointingHandButton {
     var isCurrent = false
     var isKeyboardSelected = false { didSet { needsDisplay = true } }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
     override func draw(_ dirtyRect: NSRect) {
         if isKeyboardSelected || isHighlighted {
             NSColor.systemBlue.withAlphaComponent(0.12).setFill()

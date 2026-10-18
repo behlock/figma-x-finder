@@ -6,7 +6,7 @@ public struct Destination: Codable, Equatable {
     public let id: String
     public var name: String
     public let fileKey: String
-    public let pageID: String
+    public var pageID: String
     public let nodeID: String?
 
     public init(name: String, fileKey: String, pageID: String, nodeID: String?) {
@@ -34,11 +34,20 @@ public struct Destination: Codable, Equatable {
               nodeID == nil || nodeID!.range(of: "^[0-9]+:[0-9]+$", options: .regularExpression) != nil
         else { throw BridgeError.message("Choose a valid Figma Design page or frame.") }
     }
+
+    fileprivate func hasSameTarget(as other: Destination) -> Bool {
+        fileKey == other.fileKey && nodeID == other.nodeID && (nodeID != nil || pageID == other.pageID)
+    }
 }
 
 public enum BridgeError: LocalizedError {
     case message(String)
     public var errorDescription: String? { if case .message(let message) = self { return message }; return nil }
+}
+
+public struct DestinationChange: Codable {
+    public let destination: Destination
+    public let previousName: String?
 }
 
 public struct QueuedImage: Codable {
@@ -82,20 +91,47 @@ public final class Store {
         let url = directory.appendingPathComponent("state.json")
         state = FileManager.default.fileExists(atPath: url.path)
             ? try JSONDecoder().decode(State.self, from: Data(contentsOf: url)) : State()
+        var unique: [Destination] = []
+        for destination in state.destinations {
+            if let index = unique.firstIndex(where: { $0.hasSameTarget(as: destination) }) {
+                unique[index].name = destination.name
+                unique[index].pageID = destination.pageID
+                if state.lastDestinationID == destination.id { state.lastDestinationID = unique[index].id }
+            } else { unique.append(destination) }
+        }
+        state.destinations = unique
         try FileManager.default.createDirectory(at: queueDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try persist(state)
     }
 
-    public func save(_ destination: Destination) throws {
+    @discardableResult
+    public func save(_ destination: Destination) throws -> DestinationChange {
         try destination.validate()
         var updated = state
-        if let index = updated.destinations.firstIndex(where: {
-            $0.fileKey == destination.fileKey && $0.pageID == destination.pageID && $0.nodeID == destination.nodeID
-        }) {
+        let index = updated.destinations.firstIndex(where: { $0.hasSameTarget(as: destination) })
+        let previousName = index.map { updated.destinations[$0].name }
+        if let index {
             updated.destinations[index].name = destination.name
+            updated.destinations[index].pageID = destination.pageID
         } else {
             // Registration never accepts an externally supplied local ID.
             updated.destinations.append(Destination(name: destination.name, fileKey: destination.fileKey, pageID: destination.pageID, nodeID: destination.nodeID))
+        }
+        try persist(updated)
+        return DestinationChange(destination: updated.destinations[index ?? (updated.destinations.count - 1)], previousName: previousName)
+    }
+
+    public func undo(_ change: DestinationChange) throws {
+        guard let index = state.destinations.firstIndex(of: change.destination) else {
+            throw BridgeError.message("This destination has changed. Save it again to continue.")
+        }
+        var updated = state
+        if let name = change.previousName {
+            updated.destinations[index].name = name
+            try updated.destinations[index].validate()
+        } else {
+            updated.destinations.remove(at: index)
+            if updated.lastDestinationID == change.destination.id { updated.lastDestinationID = nil }
         }
         try persist(updated)
     }

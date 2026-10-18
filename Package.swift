@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "FigmaFinder",
+    name: "Figma x Finder",
     platforms: [.macOS(.v13)],
     products: [.executable(name: "FigmaFinder", targets: ["FigmaFinder"])],
     targets: [

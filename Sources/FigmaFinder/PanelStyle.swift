@@ -127,20 +127,49 @@ class PanelPillButton: PointingHandButton {
 }
 
 @MainActor
-final class CircularSendButton: NSButton {
-    var completed = false { didSet { needsDisplay = true } }
+final class CircularSendButton: PointingHandButton {
+    enum Phase { case ready, sending, failed }
+    private let progress = NSProgressIndicator()
+    var phase: Phase = .ready {
+        didSet {
+            guard phase != oldValue else { return }
+            if phase == .sending { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
+            needsDisplay = true
+        }
+    }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        progress.style = .spinning
+        progress.isIndeterminate = true
+        progress.appearance = NSAppearance(named: .darkAqua)
+        progress.controlSize = .small
+        progress.isDisplayedWhenStopped = false
+        progress.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(progress)
+        NSLayoutConstraint.activate([
+            progress.centerXAnchor.constraint(equalTo: centerXAnchor),
+            progress.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+    required init?(coder: NSCoder) { nil }
     override var isEnabled: Bool { didSet { needsDisplay = true } }
     override var focusRingMaskBounds: NSRect { bounds.insetBy(dx: 5, dy: 5) }
     override func drawFocusRingMask() { NSBezierPath(ovalIn: focusRingMaskBounds).fill() }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
     override func draw(_ dirtyRect: NSRect) {
-        let active = isEnabled || completed
-        let ink: NSColor = active ? .systemBlue : .tertiaryLabelColor
+        let active = isEnabled || phase != .ready
+        let ink: NSColor = phase == .failed ? .systemRed : (active ? .systemBlue : .tertiaryLabelColor)
         ink.withAlphaComponent(active ? 0.10 : 0.06).setFill()
         NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).fill()
         (isHighlighted && isEnabled ? ink.blended(withFraction: 0.15, of: .black)! : ink).setFill()
         NSBezierPath(ovalIn: bounds.insetBy(dx: 6, dy: 6)).fill()
-        let symbol = NSImage(systemSymbolName: completed ? "checkmark" : "arrow.up.right", accessibilityDescription: nil)?
+        let name: String
+        switch phase {
+        case .ready: name = "arrow.up.right"
+        case .sending: name = ""
+        case .failed: name = "exclamationmark"
+        }
+        let symbol: NSImage? = name.isEmpty ? nil : NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 17, weight: .medium)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [.white])))
         symbol?.draw(in: NSRect(x: bounds.midX - 10, y: bounds.midY - 10, width: 20, height: 20))

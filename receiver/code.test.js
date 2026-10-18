@@ -10,6 +10,9 @@ class Node {
     this.width = 100; this.height = 100; this.rotation = 0;
     this.layoutMode = 'NONE'; this.locked = false; this.visible = true;
     this.clipsContent = false;
+    this.layoutSizingHorizontal = 'FIXED'; this.layoutSizingVertical = 'FIXED';
+    this.layoutPositioning = 'AUTO';
+    this.paddingLeft = this.paddingRight = this.paddingTop = this.paddingBottom = 0;
   }
   get relativeTransform() {
     const angle = this.rotation * Math.PI / 180;
@@ -25,6 +28,11 @@ class Node {
     ]);
   }
   resize(width, height) { this.width = width; this.height = height; }
+  resizeWithoutConstraints(width, height) {
+    this.width = width; this.height = height;
+    this.layoutSizingHorizontal = this.layoutSizingVertical = 'FIXED';
+  }
+  remove() { this.parent.children = this.parent.children.filter(child => child !== this); }
   appendChild(node) {
     if (node.parent) node.parent.children = node.parent.children.filter(child => child !== node);
     node.parent = this; this.children.push(node);
@@ -160,14 +168,93 @@ test('replaying an image after a lost acknowledgement creates no duplicate, even
   assert.deepEqual([image.x, image.y], position);
 });
 
-test('wrong file, missing page, and unsafe frames are rejected before importing', async () => {
+test('wrong file, missing page, and locked frames are rejected before importing', async () => {
   const { frame, job } = setup();
   await assert.rejects(resolveDestination({ ...job, destination: { ...job.destination, fileKey: 'different' } }), /another Figma file/);
-  await assert.rejects(resolveDestination({ ...job, destination: { ...job.destination, pageID: '9:9' } }), /deleted/);
+  await assert.rejects(resolveDestination({ ...job, destination: { ...job.destination, nodeID: null, pageID: '9:9' } }), /deleted/);
+  await assert.rejects(resolveDestination({ ...job, destination: { ...job.destination, nodeID: '0:1' } }), /deleted/);
   frame.locked = true;
   assert.throws(() => validateContainer(frame), /unlocked/);
-  frame.locked = false; frame.layoutMode = 'HORIZONTAL';
-  assert.throws(() => validateContainer(frame), /freeform/);
+});
+
+test('queued images follow their frame to a different page without re-registering', async () => {
+  const { page, frame, job } = setup();
+  const nextPage = new Node('PAGE', '0:2');
+  figma.root.appendChild(nextPage);
+  nextPage.appendChild(frame);
+  page.remove();
+  const result = await importImage(job, 'image0', [1]);
+  assert.equal(figma.currentPage, nextPage);
+  assert.equal(frame.children.find(node => node.id === result.nodeID).parent, frame);
+  const replay = await importImage(job, 'image0', [1]);
+  assert.equal(replay.nodeID, result.nodeID);
+  assert.equal(replay.reused, true);
+});
+
+test('auto-layout images keep native placement and sizing modes, with room for overflow', async () => {
+  for (const layoutMode of ['HORIZONTAL', 'VERTICAL', 'GRID']) {
+    const { frame, old, job } = setup();
+    frame.resize(500, 500);
+    frame.layoutMode = layoutMode;
+    frame.layoutSizingVertical = 'HUG';
+    frame.paddingLeft = frame.paddingRight = frame.paddingTop = frame.paddingBottom = 24;
+    old.x = 24; old.y = 24;
+    const oldGeometry = [old.x, old.y, old.width, old.height];
+    const position = layoutMode === 'VERTICAL' ? { x: 24, y: 400 } : { x: 400, y: 24 };
+    frame.appendChild = node => {
+      Node.prototype.appendChild.call(frame, node);
+      for (const axis of ['x', 'y']) Object.defineProperty(node, axis, {
+        get: () => position[axis],
+        set() { assert.fail('Auto Layout owns image placement.'); }
+      });
+    };
+    frame.resize = () => assert.fail('Frame growth must preserve child constraints.');
+    await importImage(job, 'image0', [1]);
+    const image = frame.children[1];
+    assert.equal(image.x, position.x);
+    assert.equal(image.y, position.y);
+    assert.equal(image.layoutPositioning, 'AUTO');
+    assert.equal(frame.layoutMode, layoutMode);
+    assert.equal(frame.layoutSizingVertical, 'HUG');
+    assert.equal(frame.paddingBottom, 24);
+    assert.ok(frame.width >= image.x + image.width + 24);
+    assert.ok(frame.height >= image.y + image.height + 24);
+    assert.deepEqual([old.x, old.y, old.width, old.height], oldGeometry);
+    const replay = await importImage(job, 'image0', [1]);
+    assert.equal(replay.reused, true);
+    assert.equal(frame.children.length, 2);
+  }
+});
+
+test('rotated frames and frames nested in auto-layout or clipping parents accept images', async () => {
+  const { page, frame, old, job } = setup();
+  const parent = new Node('FRAME');
+  parent.layoutMode = 'HORIZONTAL'; parent.clipsContent = true; parent.rotation = -20;
+  parent.resize(3000, 3000);
+  page.appendChild(parent); parent.appendChild(frame);
+  frame.x = 500; frame.y = 500; frame.rotation = 35; frame.resize(1200, 900);
+  const geometry = [old.x, old.y, old.width, old.height];
+  const result = await importImage(job, 'image0', [1]);
+  const image = frame.children.find(node => node.id === result.nodeID);
+  assert.equal(image.parent, frame);
+  assert.equal(image.rotation, 0);
+  assert.equal(frame.rotation, 35);
+  assert.deepEqual([old.x, old.y, old.width, old.height], geometry);
+  assert.ok(Math.abs(boundsInContainer(image, frame).x - image.x) < .001);
+  assert.ok(Math.abs(boundsInContainer(image, frame).y - image.y) < .001);
+  assertSeparated(frame);
+});
+
+test('a failed insertion leaves no partial image that can duplicate on retry', async () => {
+  const { frame, job } = setup();
+  frame.resize(200, 200);
+  const resize = frame.resizeWithoutConstraints;
+  frame.resizeWithoutConstraints = () => { throw new Error('Frame changed.'); };
+  await assert.rejects(importImage(job, 'image0', [1]), /Frame changed/);
+  assert.equal(frame.children.length, 1);
+  frame.resizeWithoutConstraints = resize;
+  await importImage(job, 'image0', [1]);
+  assert.equal(frame.children.length, 2);
 });
 
 test('page destinations fill space beside existing content and use the viewport on an empty page', async () => {

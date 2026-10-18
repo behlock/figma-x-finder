@@ -122,8 +122,10 @@ public final class Router {
             case ("GET", "/v1/destinations"):
                 return try .json(store.destinations)
             case ("POST", "/v1/destinations"):
-                try store.save(JSONDecoder().decode(Destination.self, from: request.body))
-                return try .json(store.destinations)
+                return try .json(store.save(JSONDecoder().decode(Destination.self, from: request.body)))
+            case ("POST", "/v1/destinations/undo"):
+                try store.undo(JSONDecoder().decode(DestinationChange.self, from: request.body))
+                return HTTPResponse(status: 204)
             case ("GET", "/v1/jobs"):
                 guard let key = value("fileKey"), let receiver = value("receiver"), receiver.count <= 100, !receiver.isEmpty else {
                     throw BridgeError.message("File and receiver are required.")

@@ -3,28 +3,23 @@ import BridgeCore
 
 @MainActor
 final class PickerController: NSWindowController, NSWindowDelegate {
-    var onClose: (() -> Void)?
     private let store: Store
     private var urls: [URL]
-    private let isSetup: Bool
-    private let destinations = DestinationPicker()
-    private let status = NSTextField(wrappingLabelWithString: "")
-    private let sendButton = CircularSendButton(title: "Send", target: nil, action: nil)
+    private lazy var destinations = DestinationPicker()
+    private lazy var sendButton = CircularSendButton(title: "Send", target: nil, action: nil)
     private let stack = PickerController.column([], spacing: 14)
     private var destinationSurface: NSView?
     private var setupSurface: NSView?
     private var preview: ImagePreviewStrip?
     private var timer: Timer?
     private var jobID: String?
-    private var sentCount = 0
-    private var sentName = ""
-    private var skippedCount = 0
+    private var skipped: [String] = []
     private var sendError: String?
 
     init(store: Store, urls: [URL]) {
         self.store = store
         self.urls = urls
-        self.isSetup = urls.isEmpty
+        let isSetup = urls.isEmpty
         let window = PickerWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 380), styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = urls.isEmpty ? "Connect to Figma" : "Send to Figma"
         window.titleVisibility = .hidden
@@ -54,31 +49,25 @@ final class PickerController: NSWindowController, NSWindowDelegate {
         let setupSurface = pluginStep()
         self.setupSurface = setupSurface
         stack.addArrangedSubview(setupSurface)
-        destinations.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        destinations.onChange = { [weak self] in self?.sendError = nil; self?.refresh() }
-        destinations.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        sendButton.target = self
-        sendButton.action = #selector(send)
-        sendButton.keyEquivalent = "\r"
-        sendButton.isBordered = false
-        sendButton.focusRingType = .exterior
-        sendButton.toolTip = "Send to Figma (Return)"
-        sendButton.setAccessibilityLabel("Send")
-        let destinationRow = NSStackView(views: urls.isEmpty ? [destinations] : [destinations, sendButton])
-        destinationRow.alignment = .centerY
-        destinationRow.spacing = 12
-        destinations.widthAnchor.constraint(equalTo: destinationRow.widthAnchor, constant: urls.isEmpty ? 0 : -66).isActive = true
-        if !urls.isEmpty {
+        if !isSetup {
+            destinations.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            destinations.onChange = { [weak self] in self?.sendError = nil; self?.refresh() }
+            destinations.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            sendButton.target = self
+            sendButton.action = #selector(send)
+            sendButton.keyEquivalent = "\r"
+            sendButton.isBordered = false
+            sendButton.focusRingType = .exterior
+            let destinationRow = NSStackView(views: [destinations, sendButton])
+            destinationRow.alignment = .centerY
+            destinationRow.spacing = 12
+            destinations.widthAnchor.constraint(equalTo: destinationRow.widthAnchor, constant: -66).isActive = true
             sendButton.widthAnchor.constraint(equalToConstant: 54).isActive = true
             sendButton.heightAnchor.constraint(equalToConstant: 54).isActive = true
+            let destinationSurface = PanelStyle.surface(around: destinationRow)
+            self.destinationSurface = destinationSurface
+            stack.addArrangedSubview(destinationSurface)
         }
-        let destinationSurface = PanelStyle.surface(around: destinationRow)
-        self.destinationSurface = destinationSurface
-        stack.addArrangedSubview(destinationSurface)
-        status.font = .systemFont(ofSize: 12)
-        status.textColor = .secondaryLabelColor
-        status.setContentCompressionResistancePriority(.required, for: .vertical)
-        stack.addArrangedSubview(status)
 
         window.contentView!.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -87,9 +76,11 @@ final class PickerController: NSWindowController, NSWindowDelegate {
             stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 48)
         ])
         for view in stack.arrangedSubviews { view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
-        refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        if isSetup { fitWindow() } else {
+            refresh()
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.refresh() }
+            }
         }
     }
 
@@ -104,13 +95,13 @@ final class PickerController: NSWindowController, NSWindowDelegate {
 
     private func pluginStep() -> NSView {
         let button = PanelPillButton(frame: .zero)
-        button.title = "Show manifest…"
+        button.title = "Show manifest"
         button.target = self
         button.action = #selector(revealPlugin)
         button.contentTintColor = .systemBlue
         button.toolTip = "Show manifest.json"
         button.heightAnchor.constraint(equalToConstant: 38).isActive = true
-        let steps = ["Import Figma Plugin", "Run Figma Finder Bridge"]
+        let steps = ["Import plugin in Figma", "Select the frame you want to use as destination", "Run Figma x Finder plugin"]
         let rows = steps.enumerated().map { index, step -> NSView in
             let number = PanelStyle.label("\(index + 1)", size: 14, color: .secondaryLabelColor)
             number.widthAnchor.constraint(equalToConstant: 20).isActive = true
@@ -149,10 +140,8 @@ final class PickerController: NSWindowController, NSWindowDelegate {
     }
 
     required init?(coder: NSCoder) { nil }
-    override func close() { timer?.invalidate(); super.close() }
     func windowWillClose(_ notification: Notification) {
         timer?.invalidate()
-        onClose?()
     }
 
     private var selected: Destination? {
@@ -162,32 +151,37 @@ final class PickerController: NSWindowController, NSWindowDelegate {
     private func refresh() {
         let saved = store.destinations
         destinations.update(saved, rememberedID: store.lastDestinationID)
-        setupSurface?.isHidden = !isSetup && !saved.isEmpty
-        destinationSurface?.isHidden = isSetup || saved.isEmpty
+        setupSurface?.isHidden = !saved.isEmpty
+        destinationSurface?.isHidden = saved.isEmpty
         destinations.isEnabled = !saved.isEmpty && jobID == nil
         preview?.allowsRemoval = jobID == nil
         sendButton.isEnabled = !urls.isEmpty && selected != nil && jobID == nil
-        sendButton.completed = false
+        var phase = CircularSendButton.Phase.ready
         sendButton.setAccessibilityLabel("Send")
-        status.textColor = .secondaryLabelColor
-        status.stringValue = ""
+        var help = "Send to Figma (Return)"
         if let jobID {
             if let job = store.jobs.first(where: { $0.id == jobID }) {
-                if job.lastError != nil { status.textColor = .systemRed }
-                let pending = job.images.count - job.completed.count
-                status.stringValue = job.lastError ?? "\(pending) image\(pending == 1 ? "" : "s") queued. Run the receiver in \(sentName) to finish."
+                phase = job.lastError != nil ? .failed : .sending
+                help = job.lastError ?? (job.completed.isEmpty ? "Waiting for Figma" : "Sending to Figma")
+                sendButton.setAccessibilityLabel(help)
+            } else if skipped.isEmpty {
+                close()
+                return
             } else {
-                sendButton.completed = true
-                sendButton.setAccessibilityLabel("Sent")
-                status.stringValue = "Added \(sentCount) image\(sentCount == 1 ? "" : "s") to \(sentName)." + (skippedCount > 0 ? " \(skippedCount) skipped." : "")
+                phase = .failed
+                help = skipped.joined(separator: "\n")
+                sendButton.setAccessibilityLabel("Some files were not sent")
             }
         } else if let sendError {
-            status.stringValue = sendError
-            status.textColor = .systemRed
-        } else if !isSetup && urls.isEmpty {
-            status.stringValue = "No images selected. Choose images in Finder to send."
+            phase = .failed
+            sendButton.setAccessibilityLabel("Retry send")
+            help = sendError
+        } else if urls.isEmpty {
+            help = "Choose images in Finder to send."
         }
-        status.isHidden = status.stringValue.isEmpty
+        sendButton.phase = phase
+        sendButton.toolTip = help
+        sendButton.setAccessibilityHelp(help)
         fitWindow()
     }
 
@@ -197,16 +191,8 @@ final class PickerController: NSWindowController, NSWindowDelegate {
         do {
             let result = try store.enqueue(urls, destination: destination)
             jobID = result.job.id
-            sentCount = result.job.images.count
-            sentName = destination.name
-            skippedCount = result.skipped.count
+            skipped = result.skipped
             refresh()
-            if !result.skipped.isEmpty {
-                let alert = NSAlert()
-                alert.messageText = "Queued \(sentCount) images; skipped \(skippedCount) files"
-                alert.informativeText = result.skipped.joined(separator: "\n")
-                alert.beginSheetModal(for: window!)
-            }
         } catch {
             sendError = error.localizedDescription
             refresh()
@@ -218,8 +204,9 @@ final class PickerController: NSWindowController, NSWindowDelegate {
         if FileManager.default.fileExists(atPath: manifest.path) {
             NSWorkspace.shared.activateFileViewerSelecting([manifest])
         } else {
-            sendError = "The receiver plugin isn’t included in this build yet."
-            refresh()
+            let alert = NSAlert()
+            alert.messageText = "The plugin isn’t included in this build."
+            alert.beginSheetModal(for: window!)
         }
     }
 
