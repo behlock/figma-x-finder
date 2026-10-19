@@ -3,6 +3,7 @@ import BridgeCore
 
 @MainActor
 final class PickerController: NSWindowController, NSWindowDelegate {
+    var onClose: (() -> Void)?
     private let store: Store
     private var urls: [URL]
     private lazy var destinations = DestinationPicker()
@@ -13,6 +14,7 @@ final class PickerController: NSWindowController, NSWindowDelegate {
     private var preview: ImagePreviewStrip?
     private var timer: Timer?
     private var jobID: String?
+    private var isPreparing = false
     private var skipped: [String] = []
     private var sendError: String?
 
@@ -39,7 +41,7 @@ final class PickerController: NSWindowController, NSWindowDelegate {
             self.preview = preview
             preview.onSizeChange = { [weak self] in self?.fitWindow(animated: true) }
             preview.onRemove = { [weak self] index in
-                guard let self, self.jobID == nil, self.urls.indices.contains(index) else { return }
+                guard let self, self.jobID == nil, !self.isPreparing, self.urls.indices.contains(index) else { return }
                 self.urls.remove(at: index)
                 self.sendError = nil
                 self.refresh()
@@ -134,14 +136,24 @@ final class PickerController: NSWindowController, NSWindowDelegate {
             var frame = window.frame
             let delta = height - content.bounds.height
             frame.size.height += delta
-            frame.origin.y -= delta
+            frame.origin.y -= delta / 2
             window.setFrame(frame, display: true, animate: animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
         }
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func showWindow(_ sender: Any?) {
+        if let window, let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
+            let bounds = screen.visibleFrame
+            window.setFrameOrigin(NSPoint(x: bounds.midX - window.frame.width / 2, y: bounds.midY - window.frame.height / 2))
+        }
+        super.showWindow(sender)
+    }
+
     func windowWillClose(_ notification: Notification) {
         timer?.invalidate()
+        onClose?()
     }
 
     private var selected: Destination? {
@@ -153,13 +165,17 @@ final class PickerController: NSWindowController, NSWindowDelegate {
         destinations.update(saved, rememberedID: store.lastDestinationID)
         setupSurface?.isHidden = !saved.isEmpty
         destinationSurface?.isHidden = saved.isEmpty
-        destinations.isEnabled = !saved.isEmpty && jobID == nil
-        preview?.allowsRemoval = jobID == nil
-        sendButton.isEnabled = !urls.isEmpty && selected != nil && jobID == nil
+        destinations.isEnabled = !saved.isEmpty && jobID == nil && !isPreparing
+        preview?.allowsRemoval = jobID == nil && !isPreparing
+        sendButton.isEnabled = !urls.isEmpty && selected != nil && jobID == nil && !isPreparing
         var phase = CircularSendButton.Phase.ready
         sendButton.setAccessibilityLabel("Send")
         var help = "Send to Figma (Return)"
-        if let jobID {
+        if isPreparing {
+            phase = .sending
+            help = "Preparing images"
+            sendButton.setAccessibilityLabel(help)
+        } else if let jobID {
             if let job = store.jobs.first(where: { $0.id == jobID }) {
                 phase = job.lastError != nil ? .failed : .sending
                 help = job.lastError ?? (job.completed.isEmpty ? "Waiting for Figma" : "Sending to Figma")
@@ -186,15 +202,17 @@ final class PickerController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func send() {
-        guard jobID == nil, !urls.isEmpty, let destination = selected else { return }
+        guard jobID == nil, !isPreparing, !urls.isEmpty, let destination = selected else { return }
         sendError = nil
-        do {
-            let result = try store.enqueue(urls, destination: destination)
-            jobID = result.job.id
-            skipped = result.skipped
-            refresh()
-        } catch {
-            sendError = error.localizedDescription
+        isPreparing = true
+        refresh()
+        Task {
+            do {
+                let result = try await store.enqueueInBackground(urls, destination: destination)
+                jobID = result.job.id
+                skipped = result.skipped
+            } catch { sendError = error.localizedDescription }
+            isPreparing = false
             refresh()
         }
     }

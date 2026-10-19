@@ -1,11 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
-swift scripts/stop-app.swift
-bash scripts/build-app.sh
 application_directory="${1:-$HOME/Applications}"
 destination="$application_directory/$app_name.app"
 verify_app "$destination"
+bash scripts/build-app.sh
+swift scripts/stop-app.swift
 mkdir -p "$application_directory"
 if [ "$(cd "$application_directory" && pwd)/$app_name.app" != "$PWD/build/$app_name.app" ]; then
     replace_app "build/$app_name.app" "$destination"

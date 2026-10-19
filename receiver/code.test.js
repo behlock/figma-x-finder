@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { importImage, resolveDestination, validateContainer, boundsInContainer, occupiedBounds, overlaps, IMAGE_GAP } = require('./code');
+const { importImage, resolveDestination, validateContainer, boundsInContainer, occupiedBounds, overlaps, findPlacement, handle, IMAGE_GAP } = require('./code');
 
 let counter;
 class Node {
@@ -32,7 +32,7 @@ class Node {
     this.width = width; this.height = height;
     this.layoutSizingHorizontal = this.layoutSizingVertical = 'FIXED';
   }
-  remove() { this.parent.children = this.parent.children.filter(child => child !== this); }
+  remove() { this.parent.children = this.parent.children.filter(child => child !== this); this.removed = true; }
   appendChild(node) {
     if (node.parent) node.parent.children = node.parent.children.filter(child => child !== node);
     node.parent = this; this.children.push(node);
@@ -46,6 +46,15 @@ class Node {
       if (found) return found;
     }
     return null;
+  }
+  findAllWithCriteria({ types, pluginData }) {
+    const result = [];
+    for (const node of this.children) {
+      if ((!types || types.includes(node.type)) &&
+          (!pluginData || pluginData.keys.some(key => node.data[key]))) result.push(node);
+      result.push(...node.findAllWithCriteria({ types, pluginData }));
+    }
+    return result;
   }
 }
 
@@ -269,4 +278,91 @@ test('page destinations fill space beside existing content and use the viewport 
   await importImage(job, 'image1', [1]);
   assert.equal(page.children[0].x, 4840);
   assert.equal(page.children[0].y, -3080);
+});
+
+test('a batch uses one native index query and no page-wide plugin-data callbacks', async () => {
+  const { page, frame, job } = setup();
+  frame.layoutMode = 'VERTICAL';
+  const unrelated = new Node('FRAME'); page.appendChild(unrelated);
+  for (let i = 0; i < 10000; i++) {
+    const node = new Node('TEXT');
+    node.getPluginData = () => assert.fail('Unrelated layers must be filtered natively.');
+    unrelated.appendChild(node);
+  }
+  let scans = 0;
+  const nativeFind = page.findAllWithCriteria.bind(page);
+  page.findAllWithCriteria = criteria => { scans++; return nativeFind(criteria); };
+  assert.deepEqual(await handle({ type: 'prepare', job }), { existing: [] });
+  for (const image of job.images) await importImage(job, image.id, [1]);
+  assert.equal(scans, 1);
+  assert.equal(frame.children.filter(n => n.getPluginData('finderImage')).length, job.images.length);
+  await importImage(job, job.images[0].id, [1]);
+  assert.equal(scans, 1);
+  assert.equal(frame.children.length, job.images.length + 1);
+});
+
+test('prepare recovers imports nested since a previous receiver run and skips completed images', async () => {
+  const { page, frame, job } = setup();
+  const group = new Node('GROUP'); page.appendChild(group);
+  const imported = new Node('RECTANGLE'); group.appendChild(imported);
+  imported.setPluginData('finderImage', `${job.id}.image0`);
+  job.completed = ['image1'];
+  const completed = new Node('RECTANGLE'); frame.appendChild(completed);
+  completed.setPluginData('finderImage', `${job.id}.image1`);
+  assert.deepEqual(await handle({ type: 'prepare', job }), { existing: ['image0'] });
+  const retry = await importImage(job, 'image0', [1]);
+  assert.equal(retry.reused, true);
+  imported.remove();
+  const replacement = await importImage(job, 'image0', [1]);
+  assert.equal(replacement.reused, false);
+});
+
+test('bridge dimensions avoid waiting for Figma to decode the image again', async () => {
+  const { frame, job } = setup();
+  job.images[0].width = 1200;
+  job.images[0].height = 2400;
+  const bytes = new Uint8Array([1, 2, 3]);
+  figma.createImage = received => {
+    assert.equal(received, bytes, 'Already typed bytes must not be copied again.');
+    return { hash: 'image-hash', getSizeAsync() { assert.fail('Dimensions are already available.'); } };
+  };
+  const result = await importImage(job, 'image0', bytes);
+  const node = frame.children.find(node => node.id === result.nodeID);
+  assert.equal(node.width / node.height, .5);
+});
+
+test('affine bounds handle rotation, scaling, shear, and reflection together', () => {
+  const container = { type: 'FRAME', absoluteTransform: [[0, -2, 100], [2, 0, 200]] };
+  const node = { width: 10, height: 20, absoluteTransform: [[-3, 1, 120], [1, 4, 240]] };
+  assert.deepEqual(boundsInContainer(node, container), { x: 20, y: -20, width: 45, height: 25 });
+});
+
+test('collecting large sibling sets does not exceed the JavaScript argument limit', () => {
+  const root = { type: 'DOCUMENT' };
+  const page = { type: 'PAGE', parent: root };
+  const frame = { type: 'FRAME', parent: page, width: 1000, height: 1000, children: [],
+    absoluteTransform: [[1, 0, 0], [0, 1, 0]] };
+  const sibling = { visible: true, width: 100, height: 100, absoluteTransform: [[1, 0, 5000], [0, 1, 5000]] };
+  page.children = Array(160001).fill(sibling);
+  page.children[0] = frame;
+  assert.equal(occupiedBounds(frame, true).length, 160000);
+});
+
+test('placement remains collision-free on a large page and a stack beyond a full board', () => {
+  const { page, frame } = setup();
+  const children = Array.from({ length: 10000 }, (_, i) => ({
+    visible: true, width: 100, height: 100,
+    absoluteTransform: [[1, 0, (i % 100) * 1000], [0, 1, Math.floor(i / 100) * 1000]]
+  }));
+  const largePage = { type: 'PAGE', children };
+  const result = findPlacement(largePage, 320, 160);
+  for (const child of children) assert.equal(overlaps(result, boundsInContainer(child, largePage), IMAGE_GAP), false);
+  frame.children = [];
+  frame.resize(200, 200);
+  const full = new Node('RECTANGLE'); full.resize(200, 200); frame.appendChild(full);
+  for (let i = 0; i < 1000; i++) {
+    const blocker = new Node('RECTANGLE'); blocker.x = 64; blocker.y = 264 + i * 164; page.appendChild(blocker);
+  }
+  const fallback = findPlacement(frame, 72, 100);
+  for (const bounds of occupiedBounds(frame, true)) assert.equal(overlaps(fallback, bounds, IMAGE_GAP), false);
 });

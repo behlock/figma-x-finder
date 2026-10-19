@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const token = 'A'.repeat(64);
 const response = (body = {}, status = 200) => ({ ok: status >= 200 && status < 300, status, async json() { return body; } });
 
-function receiver({ storedToken, fetch: customFetch } = {}) {
+function receiver({ storedToken, fetch: customFetch, onRPC, fakeTimers = false } = {}) {
   const elements = new Map();
   const element = id => {
     if (!elements.has(id)) elements.set(id, { value: '', textContent: '', disabled: false, hidden: true, dataset: {} });
@@ -14,6 +14,10 @@ function receiver({ storedToken, fetch: customFetch } = {}) {
   };
   const storage = new Map(storedToken ? [['connectionKey', storedToken]] : []);
   const calls = [];
+  const timers = new Map(), intervals = [];
+  let timerSequence = 0;
+  const rpcCalls = [];
+  const reply = (message, result) => plugin.ui.postMessage({ type: 'reply', requestID: message.requestID, result });
   const destinations = new Map();
   let destinationSequence = 0;
   const target = destination => `${destination.fileKey}/${destination.nodeID ? `frame/${destination.nodeID}` : `page/${destination.pageID}`}`;
@@ -30,10 +34,14 @@ function receiver({ storedToken, fetch: customFetch } = {}) {
   const ui = {
     document: { getElementById: element }, window: {},
     parent: { postMessage({ pluginMessage: message }) {
+      rpcCalls.push(message);
+      if (onRPC?.(message, result => reply(message, result))) return;
       if (message.type === 'prepare') plugin.ui.postMessage({ type: 'reply', requestID: message.requestID, result: { existing: message.job.images.map(image => image.id) } });
       else plugin.ui.onmessage(message);
     } },
-    setTimeout, clearTimeout, setInterval() {}, AbortSignal, Uint8Array, TypeError,
+    setTimeout: fakeTimers ? callback => { const id = ++timerSequence; timers.set(id, callback); return id; } : setTimeout,
+    clearTimeout: fakeTimers ? id => timers.delete(id) : clearTimeout,
+    setInterval(callback, ms) { intervals.push({ callback, ms }); }, AbortSignal, Uint8Array, TypeError,
     async fetch(url, options) {
       calls.push({ url, options });
       if (customFetch) {
@@ -63,7 +71,7 @@ function receiver({ storedToken, fetch: customFetch } = {}) {
   vm.runInNewContext(fs.readFileSync(`${__dirname}/code.js`, 'utf8'), { figma: plugin, __html__: '' });
   const script = fs.readFileSync(`${__dirname}/ui.html`, 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
   vm.runInNewContext(script, ui);
-  return { element, storage, calls, destinations, frame, poll: ui.poll };
+  return { element, storage, calls, destinations, frame, poll: ui.poll, timers, intervals, rpcCalls };
 }
 
 async function flush() { for (let index = 0; index < 5; index++) await new Promise(setImmediate); }
@@ -282,4 +290,110 @@ test('the tick undoes creation or renaming and can be retried after failure', as
   assert.equal([...destinations.values()][0].name, 'Inspo');
   assert.equal(element('name').value, 'Inspo');
   assert.equal(save.dataset.phase, 'ready');
+});
+
+test('a timed-out import blocks retries, keeps its lease, and recovers after the late reply', async () => {
+  let finishImport, imported = false, acknowledged = false;
+  const job = { id: 'slow-batch', destination: { fileKey: 'file123', pageID: '0:1' },
+    images: [{ id: 'image1', name: 'photo.jpg' }], completed: [] };
+  const { poll, timers, intervals, rpcCalls, calls, element } = receiver({
+    storedToken: token, fakeTimers: true,
+    onRPC(message, reply) {
+      if (message.type === 'prepare') { reply({ existing: imported ? ['image1'] : [] }); return true; }
+      if (message.type === 'import') {
+        assert.equal(message.bytes.length, 3);
+        finishImport = () => { imported = true; reply({ nodeID: 'new:image', reused: false }); };
+        return true;
+      }
+    },
+    fetch(url) {
+      if (url.includes('/v1/jobs?')) return response(job, acknowledged ? 204 : 200);
+      if (url.includes('/v1/image?')) return { ok: true, status: 200, async arrayBuffer() { return new Uint8Array([1, 2, 3]).buffer; } };
+      if (url.endsWith('/v1/ack')) { acknowledged = true; return response({}, 204); }
+    }
+  });
+  await flush();
+  assert.equal(typeof finishImport, 'function');
+  assert.equal(timers.size, 1);
+  [...timers.values()][0]();
+  await flush();
+  assert.match(element('status').textContent, /taking longer/);
+  const previousRPCs = rpcCalls.length;
+  const previousPolls = calls.filter(call => call.url.includes('/v1/jobs?')).length;
+  for (let i = 0; i < 5; i++) await poll();
+  assert.equal(rpcCalls.length, previousRPCs);
+  assert.equal(calls.filter(call => call.url.includes('/v1/jobs?')).length, previousPolls);
+  await intervals.find(interval => interval.ms === 20000).callback();
+  const lease = calls.find(call => call.url.endsWith('/v1/lease'));
+  assert.equal(JSON.parse(lease.options.body).jobID, job.id);
+  finishImport();
+  await flush();
+  assert.equal(acknowledged, true);
+  assert.equal(rpcCalls.filter(message => message.type === 'import').length, 1);
+  assert.equal(rpcCalls.filter(message => message.type === 'prepare').length, 1);
+  assert.equal(calls.filter(call => call.url.endsWith('/v1/error')).length, 0);
+  assert.equal(element('status').textContent, '');
+});
+
+test('a timed-out prepare cannot pile up duplicate scans', async () => {
+  let finishPrepare, queued = true;
+  const { poll, timers, rpcCalls } = receiver({ storedToken: token, fakeTimers: true,
+    onRPC(message, reply) {
+      if (message.type === 'prepare') { finishPrepare = () => { queued = false; reply({ existing: ['image1'] }); }; return true; }
+    },
+    fetch(url) {
+      if (url.includes('/v1/jobs?')) return response({ id: 'batch', images: [{ id: 'image1' }], completed: [] }, queued ? 200 : 204);
+    }
+  });
+  await flush();
+  [...timers.values()][0]();
+  await flush();
+  for (let i = 0; i < 5; i++) await poll();
+  assert.equal(rpcCalls.filter(message => message.type === 'prepare').length, 1);
+  finishPrepare();
+  await flush();
+  assert.equal(timers.size, 0);
+});
+
+test('a slow bootstrap continues initialization after its late reply', async () => {
+  let finishBootstrap;
+  const { poll, timers, element, rpcCalls } = receiver({ fakeTimers: true,
+    onRPC(message, reply) {
+      if (message.type === 'bootstrap') {
+        finishBootstrap = () => reply({ token, fileKey: 'file123', name: 'References' });
+        return true;
+      }
+    }
+  });
+  [...timers.values()][0]();
+  await poll();
+  assert.equal(rpcCalls.length, 1);
+  finishBootstrap();
+  await flush();
+  assert.equal(element('connection').hidden, true);
+  assert.equal(element('name').value, 'References');
+  assert.equal(element('save').disabled, false);
+  assert.equal(element('status').textContent, '');
+});
+
+test('a temporary delivery connection failure clears when the Mac comes back', async () => {
+  let offline = true;
+  const { poll, element } = receiver({ storedToken: token, fetch() {
+    if (offline) throw new TypeError('Failed to fetch');
+  } });
+  await flush();
+  assert.equal(element('status').textContent, 'Open Figma x Finder on your Mac.');
+  offline = false;
+  await poll();
+  assert.equal(element('status').textContent, '');
+  assert.equal(element('save').disabled, false);
+});
+
+test('a failed sandbox message does not leave an orphaned timeout', async () => {
+  const { timers, element } = receiver({ fakeTimers: true, onRPC(message) {
+    if (message.type === 'bootstrap') throw new Error('The sandbox is unavailable');
+  } });
+  await flush();
+  assert.equal(timers.size, 0);
+  assert.equal(element('status').textContent, 'The sandbox is unavailable');
 });

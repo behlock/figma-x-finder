@@ -2,7 +2,7 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-public struct Destination: Codable, Equatable {
+public struct Destination: Codable, Equatable, Sendable {
     public let id: String
     public var name: String
     public let fileKey: String
@@ -50,12 +50,17 @@ public struct DestinationChange: Codable {
     public let previousName: String?
 }
 
-public struct QueuedImage: Codable {
+public struct QueuedImage: Codable, Sendable {
     public let id: String
     public let name: String
+    public let format: String?
+    public let width: Int?
+    public let height: Int?
+    fileprivate var fileExtension: String { format == "jpeg" ? "jpg" : "png" }
+    fileprivate var contentType: String { format == "jpeg" ? "image/jpeg" : "image/png" }
 }
 
-public struct Job: Codable {
+public struct Job: Codable, Sendable {
     public let id: String
     public let destination: Destination
     public let images: [QueuedImage]
@@ -63,12 +68,19 @@ public struct Job: Codable {
     public var lastError: String?
 }
 
-public struct EnqueueResult {
+public struct EnqueueResult: Sendable {
     public let job: Job
     public let skipped: [String]
 }
 
 public final class Store {
+    public static let maximumImagesPerBatch = 100
+    private static let preparationQueue = DispatchQueue(label: "figma-finder.image-preparation", qos: .userInitiated)
+    private struct PreparedImage {
+        let format: String
+        let width: Int
+        let height: Int
+    }
     private struct State: Codable {
         var destinations: [Destination] = []
         var lastDestinationID: String?
@@ -78,6 +90,9 @@ public final class Store {
 
     public let directory: URL
     private var state: State
+    private let encoder = JSONEncoder()
+    private var preparations = 0
+    public var isPreparingImages: Bool { preparations > 0 }
     private var stateURL: URL { directory.appendingPathComponent("state.json") }
     public var destinations: [Destination] { state.destinations }
     public var lastDestinationID: String? { state.lastDestinationID }
@@ -137,10 +152,37 @@ public final class Store {
     }
 
     public func enqueue(_ urls: [URL], destination: Destination) throws -> EnqueueResult {
+        try validateEnqueue(urls, destination: destination)
+        return try commit(Self.prepare(urls, destination: destination, queueDirectory: queueDirectory))
+    }
+
+    // Only immutable input and an isolated job directory leave the main actor.
+    // State is read and committed on the main actor, after preparation finishes.
+    @MainActor
+    public func enqueueInBackground(_ urls: [URL], destination: Destination) async throws -> EnqueueResult {
+        try validateEnqueue(urls, destination: destination)
+        preparations += 1
+        defer { preparations -= 1 }
+        let directory = queueDirectory
+        let prepared: EnqueueResult = try await withCheckedThrowingContinuation { continuation in
+            Self.preparationQueue.async {
+                continuation.resume(with: Result { try Self.prepare(urls, destination: destination, queueDirectory: directory) })
+            }
+        }
+        return try commit(prepared)
+    }
+
+    private func validateEnqueue(_ urls: [URL], destination: Destination) throws {
         guard state.destinations.contains(destination) else {
             throw BridgeError.message("This destination is no longer saved.")
         }
-        guard urls.count <= 100 else { throw BridgeError.message("Send up to 100 images at a time.") }
+        guard !urls.isEmpty else { throw BridgeError.message("Choose images in Finder to send.") }
+        guard urls.count <= Self.maximumImagesPerBatch else {
+            throw BridgeError.message("Send up to \(Self.maximumImagesPerBatch) images at a time.")
+        }
+    }
+
+    private static func prepare(_ urls: [URL], destination: Destination, queueDirectory: URL) throws -> EnqueueResult {
         let id = UUID().uuidString
         let folder = queueDirectory.appendingPathComponent(id, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -151,32 +193,56 @@ public final class Store {
         for url in urls.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
             do {
                 let imageID = UUID().uuidString
-                try prepareImage(url, to: folder.appendingPathComponent(imageID + ".png"))
-                images.append(QueuedImage(id: imageID, name: url.lastPathComponent))
+                let prepared = try autoreleasepool { try prepareImage(url, to: folder.appendingPathComponent(imageID)) }
+                images.append(QueuedImage(id: imageID, name: url.lastPathComponent, format: prepared.format,
+                                          width: prepared.width, height: prepared.height))
             } catch { skipped.append("\(url.lastPathComponent): \(error.localizedDescription)") }
         }
         guard !images.isEmpty else { throw BridgeError.message(skipped.joined(separator: "\n")) }
         let job = Job(id: id, destination: destination, images: images)
-        var updated = state
-        updated.jobs.append(job)
-        updated.lastDestinationID = destination.id
-        try persist(updated)
         committed = true
         return EnqueueResult(job: job, skipped: skipped)
     }
 
+    private func commit(_ result: EnqueueResult) throws -> EnqueueResult {
+        var committed = false
+        defer {
+            if !committed { try? FileManager.default.removeItem(at: queueDirectory.appendingPathComponent(result.job.id)) }
+        }
+        // A destination may be removed or renamed while preparation is running.
+        guard state.destinations.contains(result.job.destination) else {
+            throw BridgeError.message("This destination has changed. Choose it again to send.")
+        }
+        var updated = state
+        updated.jobs.append(result.job)
+        updated.lastDestinationID = result.job.destination.id
+        try persist(updated)
+        committed = true
+        return result
+    }
+
     public func imageData(jobID: String, imageID: String) throws -> Data {
+        let image = try queuedImage(jobID: jobID, imageID: imageID)
+        return try Data(contentsOf: queueDirectory.appendingPathComponent(jobID).appendingPathComponent(imageID + "." + image.fileExtension))
+    }
+
+    public func imageContentType(jobID: String, imageID: String) throws -> String {
+        try queuedImage(jobID: jobID, imageID: imageID).contentType
+    }
+
+    private func queuedImage(jobID: String, imageID: String) throws -> QueuedImage {
         guard let job = state.jobs.first(where: { $0.id == jobID }),
-              job.images.contains(where: { $0.id == imageID }), !job.completed.contains(imageID)
+              let image = job.images.first(where: { $0.id == imageID }), !job.completed.contains(imageID)
         else { throw BridgeError.message("Queued image not found.") }
-        return try Data(contentsOf: queueDirectory.appendingPathComponent(jobID).appendingPathComponent(imageID + ".png"))
+        return image
     }
 
     public func acknowledge(jobID: String, imageID: String) throws {
         guard let index = state.jobs.firstIndex(where: { $0.id == jobID }) else { return }
-        guard state.jobs[index].images.contains(where: { $0.id == imageID }) else {
+        guard let image = state.jobs[index].images.first(where: { $0.id == imageID }) else {
             throw BridgeError.message("Queued image not found.")
         }
+        guard !state.jobs[index].completed.contains(imageID) else { return }
         var updated = state
         updated.jobs[index].completed.insert(imageID)
         updated.jobs[index].lastError = nil
@@ -185,23 +251,44 @@ public final class Store {
         // Persist acknowledgement before deleting the local image.
         try persist(updated)
         let folder = queueDirectory.appendingPathComponent(jobID)
-        try? FileManager.default.removeItem(at: finished ? folder : folder.appendingPathComponent(imageID + ".png"))
+        try? FileManager.default.removeItem(at: finished ? folder : folder.appendingPathComponent(imageID + "." + image.fileExtension))
     }
 
     public func reportError(jobID: String, message: String) throws {
         guard let index = state.jobs.firstIndex(where: { $0.id == jobID }) else { return }
+        let message = String(message.prefix(500))
+        guard state.jobs[index].lastError != message else { return }
         var updated = state
-        updated.jobs[index].lastError = String(message.prefix(500))
+        updated.jobs[index].lastError = message
         try persist(updated)
     }
 
-    private func prepareImage(_ url: URL, to output: URL) throws {
+    private static func prepareImage(_ url: URL, to output: URL) throws -> PreparedImage {
         guard url.isFileURL,
-              let source = CGImageSourceCreateWithURL(url as CFURL, nil)
+              let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0
         else { throw BridgeError.message("Not a readable image.") }
-        // Detailed photos can exceed the byte budget even within the pixel limit.
-        // Re-render from the original at smaller sizes, retaining PNG transparency.
-        for maxPixels in [4096, 3072, 2048, 1024] {
+        let type = CGImageSourceGetType(source) as String?
+        let jpeg = type == UTType.jpeg.identifier
+        let format = jpeg ? "jpeg" : "png"
+        let target = output.appendingPathExtension(jpeg ? "jpg" : "png")
+        let byteLimit = 10 * 1024 * 1024
+        let orientation = properties[kCGImagePropertyOrientation] as? Int ?? 1
+        // Keep already compatible images byte-for-byte, including transparency.
+        // Animated images still use only their first frame, as before.
+        if (jpeg || type == UTType.png.identifier), max(width, height) <= 4096,
+           orientation == 1, CGImageSourceGetCount(source) == 1,
+           (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max) <= byteLimit {
+            try FileManager.default.copyItem(at: url, to: target)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+            return PreparedImage(format: format, width: width, height: height)
+        }
+        // Do not encode the same dimensions repeatedly for inputs under 4096px.
+        let firstSize = min(4096, max(width, height))
+        for maxPixels in [firstSize] + [3072, 2048, 1024].filter({ $0 < firstSize }) {
             guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceCreateThumbnailWithTransform: true,
@@ -209,24 +296,23 @@ public final class Store {
               ] as CFDictionary)
             else { throw BridgeError.message("Not a readable image.") }
             let data = NSMutableData()
-            guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
+            guard let destination = CGImageDestinationCreateWithData(data, (jpeg ? UTType.jpeg : UTType.png).identifier as CFString, 1, nil) else {
                 throw BridgeError.message("Couldn’t prepare this image.")
             }
-            CGImageDestinationAddImage(destination, image, nil)
+            let options = jpeg ? [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary : nil
+            CGImageDestinationAddImage(destination, image, options)
             guard CGImageDestinationFinalize(destination) else {
                 throw BridgeError.message("Couldn’t prepare this image.")
             }
-            guard data.length <= 10 * 1024 * 1024 else { continue }
-            try (data as Data).write(to: output, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: output.path)
-            return
+            guard data.length <= byteLimit else { continue }
+            try (data as Data).write(to: target, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+            return PreparedImage(format: format, width: image.width, height: image.height)
         }
         throw BridgeError.message("Couldn’t fit the prepared image within 10 MB.")
     }
 
     private func persist(_ updated: State) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(updated).write(to: stateURL, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
         state = updated

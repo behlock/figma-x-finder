@@ -8,6 +8,7 @@ let package = Package(
     targets: [
         .target(name: "BridgeCore"),
         .executableTarget(name: "FigmaFinder", dependencies: ["BridgeCore"]),
-        .testTarget(name: "BridgeCoreTests", dependencies: ["BridgeCore"])
+        .testTarget(name: "BridgeCoreTests", dependencies: ["BridgeCore"]),
+        .testTarget(name: "FigmaFinderTests", dependencies: ["FigmaFinder"])
     ]
 )

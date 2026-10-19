@@ -43,13 +43,16 @@ final class DestinationPicker: PanelPillButton {
 
     override var isEnabled: Bool {
         didSet {
+            guard isEnabled != oldValue else { return }
             if !isEnabled { popover.close() }
             needsDisplay = true
         }
     }
 
     private func updateTitle() {
-        title = options.first(where: { $0.id == selectedID })?.pickerTitle ?? "No saved destinations"
+        let updated = options.first(where: { $0.id == selectedID })?.pickerTitle ?? "No saved destinations"
+        guard title != updated else { return }
+        title = updated
         setAccessibilityValue(title)
         needsDisplay = true
     }

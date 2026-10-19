@@ -11,7 +11,8 @@ final class BridgeCoreTests: XCTestCase {
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: directory) }
 
-    private func image(name: String = "reference image 日本.png", width: Int = 20, height: Int = 10, noisy: Bool = false) throws -> URL {
+    private func image(name: String = "reference image 日本.png", width: Int = 20, height: Int = 10, noisy: Bool = false,
+                       type: UTType = .png, orientation: Int = 1) throws -> URL {
         let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         if noisy {
             let pixels = context.data!.assumingMemoryBound(to: UInt8.self)
@@ -27,8 +28,8 @@ final class BridgeCoreTests: XCTestCase {
             }
         }
         let url = directory.appendingPathComponent(name)
-        let output = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
-        CGImageDestinationAddImage(output, context.makeImage()!, nil)
+        let output = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(output, context.makeImage()!, [kCGImagePropertyOrientation: orientation] as CFDictionary)
         XCTAssertTrue(CGImageDestinationFinalize(output))
         return url
     }
@@ -57,6 +58,111 @@ final class BridgeCoreTests: XCTestCase {
         let image = try JSONDecoder().decode(QueuedImage.self, from: data)
         XCTAssertEqual(image.id, "image1")
         XCTAssertEqual(image.name, "reference.png")
+        XCTAssertNil(image.format)
+    }
+
+    func testCompatiblePNGAndJPEGKeepOriginalBytesAndSurviveRestart() throws {
+        let store = try store()
+        for type in [UTType.png, .jpeg] {
+            let original = try image(name: "reference." + type.preferredFilenameExtension!, type: type)
+            let bytes = try Data(contentsOf: original)
+            let result = try store.enqueue([original], destination: store.destinations[0])
+            let reopened = try Store(directory: store.directory)
+            let image = try XCTUnwrap(result.job.images.first)
+            XCTAssertEqual(image.width, 20)
+            XCTAssertEqual(image.height, 10)
+            XCTAssertEqual(try reopened.imageData(jobID: result.job.id, imageID: image.id), bytes)
+            XCTAssertEqual(try reopened.imageContentType(jobID: result.job.id, imageID: image.id),
+                           type == .jpeg ? "image/jpeg" : "image/png")
+            let path = reopened.directory.appendingPathComponent("queue").appendingPathComponent(result.job.id)
+                .appendingPathComponent(image.id + (type == .jpeg ? ".jpg" : ".png"))
+            XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: path.path)[.posixPermissions] as? Int, 0o600)
+            try reopened.acknowledge(jobID: result.job.id, imageID: image.id)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+            // Keep this instance synchronized with the persisted queue for the next iteration.
+            try store.acknowledge(jobID: result.job.id, imageID: image.id)
+        }
+    }
+
+    func testLargeJPEGStaysJPEGAndRotatedImagesAreNormalized() throws {
+        let store = try store()
+        let original = try image(name: "wide.jpg", width: 5000, height: 20, type: .jpeg)
+        let rotated = try image(name: "rotated.jpg", width: 20, height: 10, type: .jpeg, orientation: 6)
+        let result = try store.enqueue([original, rotated], destination: store.destinations[0])
+        for image in result.job.images {
+            let data = try store.imageData(jobID: result.job.id, imageID: image.id)
+            XCTAssertLessThanOrEqual(data.count, 10 * 1024 * 1024)
+            let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+            XCTAssertEqual(CGImageSourceGetType(source) as String?, UTType.jpeg.identifier)
+            let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+            XCTAssertEqual(image.width, decoded.width)
+            XCTAssertEqual(image.height, decoded.height)
+            if image.name == "wide.jpg" { XCTAssertEqual(decoded.width, 4096) }
+            else { XCTAssertEqual(decoded.width, 10); XCTAssertEqual(decoded.height, 20) }
+        }
+    }
+
+    func testLegacyQueuedPNGWithoutFormatOrDimensionsIsStillDelivered() throws {
+        let store = try store()
+        let job = try store.enqueue([try image()], destination: store.destinations[0]).job
+        let bytes = try store.imageData(jobID: job.id, imageID: job.images[0].id)
+        let stateURL = store.directory.appendingPathComponent("state.json")
+        var state = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: stateURL)) as? [String: Any])
+        var jobs = try XCTUnwrap(state["jobs"] as? [[String: Any]])
+        var images = try XCTUnwrap(jobs[0]["images"] as? [[String: Any]])
+        for key in ["format", "width", "height"] { images[0].removeValue(forKey: key) }
+        jobs[0]["images"] = images
+        state["jobs"] = jobs
+        try JSONSerialization.data(withJSONObject: state).write(to: stateURL)
+        let reopened = try Store(directory: store.directory)
+        XCTAssertEqual(try reopened.imageData(jobID: job.id, imageID: job.images[0].id), bytes)
+        XCTAssertEqual(try reopened.imageContentType(jobID: job.id, imageID: job.images[0].id), "image/png")
+        try reopened.acknowledge(jobID: job.id, imageID: job.images[0].id)
+        XCTAssertTrue(reopened.jobs.isEmpty)
+    }
+
+    @MainActor
+    func testBackgroundPreparationCommitsWithoutLosingOtherStateChanges() async throws {
+        let store = try store()
+        let source = try image(width: 2400, height: 2400, noisy: true)
+        let destination = store.destinations[0]
+        let other = Task { @MainActor in
+            XCTAssertTrue(store.isPreparingImages, "The main actor must stay responsive during preparation")
+            try store.save(Destination(name: "Another page", fileKey: "anotherFile", pageID: "0:2", nodeID: nil))
+        }
+        let result = try await store.enqueueInBackground([source], destination: destination)
+        _ = try await other.value
+        XCTAssertFalse(store.isPreparingImages)
+        XCTAssertEqual(store.destinations.count, 2)
+        XCTAssertEqual(store.jobs.map(\.id), [result.job.id])
+        let reopened = try Store(directory: store.directory)
+        XCTAssertEqual(reopened.destinations.count, 2)
+        XCTAssertEqual(reopened.jobs.map(\.id), [result.job.id])
+    }
+
+    func testLeaseHeartbeatPreventsAnotherReceiverTakingOverDuringSlowImport() throws {
+        let store = try store()
+        let job = try store.enqueue([try image(type: .jpeg)], destination: store.destinations[0]).job
+        var time = Date()
+        let router = Router(store: store, now: { time })
+        func request(_ path: String, body: [String: String]? = nil, authorized: Bool = true) -> HTTPResponse {
+            router.handle(HTTPRequest(method: body == nil ? "GET" : "POST", url: URL(string: "http://localhost" + path)!,
+                                      headers: authorized ? ["authorization": "Bearer " + store.token] : [:],
+                                      body: body.map { try! JSONEncoder().encode($0) } ?? Data()))
+        }
+        XCTAssertEqual(request("/v1/jobs?fileKey=file123&receiver=first").status, 200)
+        let image = request("/v1/image?job=\(job.id)&image=\(job.images[0].id)&receiver=first")
+        XCTAssertEqual(image.status, 200)
+        XCTAssertEqual(image.contentType, "image/jpeg")
+        time.addTimeInterval(50)
+        XCTAssertEqual(request("/v1/lease", body: ["jobID": job.id, "receiver": "first"], authorized: false).status, 401)
+        XCTAssertEqual(request("/v1/lease", body: ["jobID": job.id, "receiver": "other"]).status, 409)
+        XCTAssertEqual(request("/v1/lease", body: ["jobID": job.id, "receiver": "first"]).status, 204)
+        time.addTimeInterval(20)
+        XCTAssertEqual(request("/v1/jobs?fileKey=file123&receiver=other").status, 204)
+        time.addTimeInterval(41)
+        XCTAssertEqual(request("/v1/jobs?fileKey=file123&receiver=other").status, 200)
+        XCTAssertEqual(request("/v1/lease", body: ["jobID": job.id, "receiver": "first"]).status, 409)
     }
 
     func testAcknowledgementIsPersistentAndIdempotent() throws {
@@ -70,6 +176,48 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertThrowsError(try reopened.imageData(jobID: result.job.id, imageID: "../../state"))
         try reopened.acknowledge(jobID: result.job.id, imageID: result.job.images[1].id)
         XCTAssertTrue(reopened.jobs.isEmpty)
+    }
+
+    func testFailedBatchDoesNotBlockLaterBatchesAndRetriesWithBackoff() throws {
+        let store = try store()
+        let source = try image()
+        let first = try store.enqueue([source], destination: store.destinations[0]).job
+        let second = try store.enqueue([source], destination: store.destinations[0]).job
+        var time = Date()
+        let router = Router(store: store, now: { time })
+        func request(_ path: String, body: [String: String]? = nil) throws -> HTTPResponse {
+            router.handle(HTTPRequest(method: body == nil ? "GET" : "POST", url: URL(string: "http://localhost" + path)!,
+                                      headers: ["authorization": "Bearer " + store.token],
+                                      body: try body.map { try JSONEncoder().encode($0) } ?? Data()))
+        }
+        func nextJob() throws -> Job? {
+            let response = try request("/v1/jobs?fileKey=file123&receiver=test")
+            return response.status == 204 ? nil : try JSONDecoder().decode(Job.self, from: response.body)
+        }
+        XCTAssertEqual(try nextJob()?.id, first.id)
+        let failure = ["jobID": first.id, "receiver": "test", "message": "Frame was deleted"]
+        XCTAssertEqual(try request("/v1/error", body: failure).status, 204)
+        XCTAssertEqual(try nextJob()?.id, second.id)
+        XCTAssertEqual(try request("/v1/ack", body: ["jobID": second.id, "imageID": second.images[0].id, "receiver": "test"]).status, 204)
+        XCTAssertNil(try nextJob())
+        time.addTimeInterval(6)
+        XCTAssertEqual(try nextJob()?.id, first.id)
+        XCTAssertEqual(try request("/v1/error", body: failure).status, 204)
+        time.addTimeInterval(6)
+        XCTAssertNil(try nextJob(), "The second failure waits ten seconds, instead of spinning every poll")
+        time.addTimeInterval(5)
+        XCTAssertEqual(try nextJob()?.id, first.id)
+        XCTAssertEqual(store.jobs.map(\.id), [first.id], "A failed batch must remain queued for recovery")
+        let fresh = try store.enqueue([source], destination: store.destinations[0]).job
+        XCTAssertEqual(try nextJob()?.id, fresh.id, "Fresh work must win even when the failed batch's retry is due")
+    }
+
+    func testEmptyAndOversizedBatchesDoNotCreateQueueDirectories() throws {
+        let store = try store()
+        let url = try image()
+        XCTAssertThrowsError(try store.enqueue([], destination: store.destinations[0]))
+        XCTAssertThrowsError(try store.enqueue(Array(repeating: url, count: Store.maximumImagesPerBatch + 1), destination: store.destinations[0]))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: store.directory.appendingPathComponent("queue").path), [])
     }
 
     func testPartialSelectionAndOversizedImage() throws {

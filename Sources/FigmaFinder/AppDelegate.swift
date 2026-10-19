@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         idleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, Date().timeIntervalSince(self.lastActivity) > 120,
+                      !self.store.isPreparingImages,
                       !NSApp.windows.contains(where: \.isVisible) else { return }
                 NSApp.terminate(nil)
             }
@@ -63,12 +64,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showPicker(_ urls: [URL]) {
+        guard urls.count <= Store.maximumImagesPerBatch else {
+            showError("Too many images", message: "Send up to \(Store.maximumImagesPerBatch) images at a time.")
+            return
+        }
         lastActivity = Date()
         picker?.close()
         let controller = PickerController(store: store, urls: urls)
+        controller.onClose = { [weak self, weak controller] in
+            guard let self, self.picker === controller else { return }
+            self.picker = nil
+        }
         picker = controller
         controller.showWindow(nil)
-        controller.window?.center()
         NSApp.activate(ignoringOtherApps: true)
     }
 

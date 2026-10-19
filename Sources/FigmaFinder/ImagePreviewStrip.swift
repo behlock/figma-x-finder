@@ -1,5 +1,4 @@
 import AppKit
-import ImageIO
 import QuartzCore
 
 @MainActor
@@ -7,7 +6,10 @@ final class ImagePreviewStrip: NSView {
     var onSizeChange: (() -> Void)?
     var onRemove: ((Int) -> Void)?
     var allowsRemoval = true {
-        didSet { tiles.forEach { $0.removeButton.isEnabled = allowsRemoval } }
+        didSet {
+            guard allowsRemoval != oldValue else { return }
+            tiles.forEach { $0.removeButton.isEnabled = allowsRemoval }
+        }
     }
     private let scroll = NSScrollView()
     private let row = NSStackView()
@@ -30,6 +32,7 @@ final class ImagePreviewStrip: NSView {
         scroll.wantsLayer = true
         scroll.translatesAutoresizingMaskIntoConstraints = false
         row.orientation = .horizontal
+        row.translatesAutoresizingMaskIntoConstraints = false
         row.alignment = .centerY
         row.spacing = 8
         row.distribution = .fill
@@ -46,7 +49,7 @@ final class ImagePreviewStrip: NSView {
         for url in urls {
             let tile = ImagePreviewTile(url: url)
             tile.previewButton.target = self
-            tile.previewButton.action = #selector(toggleSize)
+            tile.previewButton.action = #selector(toggleSize(_:))
             tile.removeButton.target = self
             tile.removeButton.action = #selector(removeImage(_:))
             row.addArrangedSubview(tile)
@@ -69,15 +72,20 @@ final class ImagePreviewStrip: NSView {
         updateFade()
     }
 
-    @objc private func toggleSize() {
+    @objc private func toggleSize(_ sender: NSButton) {
+        guard let tile = tiles.first(where: { $0.previewButton === sender }) else { return }
         expanded.toggle()
         tileConstraints.forEach { $0.constant = side }
         stripHeight.constant = side
-        if !expanded { scroll.contentView.scroll(to: .zero) }
         updateTiles()
         needsLayout = true
-        onSizeChange?()
         layoutSubtreeIfNeeded()
+        let width = scroll.contentSize.width
+        let offset = max(0, min(tile.frame.midX - width / 2, row.bounds.width - width))
+        scroll.contentView.scroll(to: NSPoint(x: offset, y: 0))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        // Window resizing can display immediately, so focus the clicked tile first.
+        onSizeChange?()
     }
 
     private func updateTiles() {
@@ -167,26 +175,24 @@ private final class ImagePreviewTile: NSView {
 @MainActor
 private final class ImagePreviewButton: PointingHandButton {
     var cornerRadius: CGFloat = 15 { didSet { needsDisplay = true } }
-    private let thumbnail: NSImage?
+    private var thumbnail: NSImage?
+    private var thumbnailRequest: Operation?
 
     init(url: URL) {
-        if let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-           let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 512
-           ] as CFDictionary) {
-            thumbnail = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
-        } else { thumbnail = nil }
         super.init(frame: .zero)
         title = url.lastPathComponent
         isBordered = false
         setAccessibilityLabel(url.lastPathComponent)
         focusRingType = .exterior
-
+        thumbnailRequest = ImageThumbnailLoader.load(url) { [weak self] image in
+            guard let self, let image else { return }
+            self.thumbnail = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+            self.needsDisplay = true
+        }
     }
 
     required init?(coder: NSCoder) { nil }
+    deinit { thumbnailRequest?.cancel() }
     override var focusRingMaskBounds: NSRect { bounds }
     override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: cornerRadius, yRadius: cornerRadius).fill() }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }

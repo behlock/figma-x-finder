@@ -152,7 +152,7 @@ final class CircularSendButton: PointingHandButton {
         ])
     }
     required init?(coder: NSCoder) { nil }
-    override var isEnabled: Bool { didSet { needsDisplay = true } }
+    override var isEnabled: Bool { didSet { if isEnabled != oldValue { needsDisplay = true } } }
     override var focusRingMaskBounds: NSRect { bounds.insetBy(dx: 5, dy: 5) }
     override func drawFocusRingMask() { NSBezierPath(ovalIn: focusRingMaskBounds).fill() }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }

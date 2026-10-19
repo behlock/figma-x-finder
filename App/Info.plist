@@ -18,6 +18,6 @@
         <key>NSPortName</key><string>Figma x Finder</string>
         <key>NSRequiredContext</key><dict><key>NSApplicationIdentifier</key><string>com.apple.finder</string></dict>
         <key>NSSendTypes</key><array><string>public.file-url</string><string>NSFilenamesPboardType</string></array>
-        <key>NSSendFileTypes</key><array><string>public.item</string></array>
+        <key>NSSendFileTypes</key><array><string>public.image</string></array>
     </dict></array>
 </dict></plist>

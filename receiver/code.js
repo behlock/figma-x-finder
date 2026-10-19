@@ -23,29 +23,35 @@ async function resolveDestination(job) {
   if (!page || page.parent !== figma.root) {
     throw new Error('The saved page was deleted. Register a new destination.');
   }
-  await figma.setCurrentPageAsync(page);
+  if (figma.currentPage.id !== page.id) await figma.setCurrentPageAsync(page);
   return { page, container };
 }
 
 const IMAGE_GAP = 64;
 
-function point(transform, x, y) {
-  return { x: transform[0][0] * x + transform[0][1] * y + transform[0][2],
-    y: transform[1][0] * x + transform[1][1] * y + transform[1][2] };
+function inverseTransform(container) {
+  if (container.type === 'PAGE') return [[1, 0, 0], [0, 1, 0]];
+  const t = container.absoluteTransform;
+  const determinant = t[0][0] * t[1][1] - t[0][1] * t[1][0];
+  return [[t[1][1] / determinant, -t[0][1] / determinant,
+    (t[0][1] * t[1][2] - t[1][1] * t[0][2]) / determinant],
+  [-t[1][0] / determinant, t[0][0] / determinant,
+    (t[1][0] * t[0][2] - t[0][0] * t[1][2]) / determinant]];
 }
 
-function boundsInContainer(node, container) {
+function boundsInContainer(node, container, inverse = inverseTransform(container)) {
   const world = node.absoluteTransform;
-  const t = container.type === 'PAGE' ? [[1, 0, 0], [0, 1, 0]] : container.absoluteTransform;
-  const determinant = t[0][0] * t[1][1] - t[0][1] * t[1][0];
-  const corners = [[0, 0], [node.width, 0], [0, node.height], [node.width, node.height]].map(([x, y]) => {
-    const p = point(world, x, y);
-    const dx = p.x - t[0][2], dy = p.y - t[1][2];
-    return { x: (t[1][1] * dx - t[0][1] * dy) / determinant,
-      y: (-t[1][0] * dx + t[0][0] * dy) / determinant };
-  });
-  const x = Math.min(...corners.map(p => p.x)), y = Math.min(...corners.map(p => p.y));
-  return { x, y, width: Math.max(...corners.map(p => p.x)) - x, height: Math.max(...corners.map(p => p.y)) - y };
+  const width = node.width, height = node.height;
+  const a = (inverse[0][0] * world[0][0] + inverse[0][1] * world[1][0]) * width;
+  const b = (inverse[1][0] * world[0][0] + inverse[1][1] * world[1][0]) * width;
+  const c = (inverse[0][0] * world[0][1] + inverse[0][1] * world[1][1]) * height;
+  const d = (inverse[1][0] * world[0][1] + inverse[1][1] * world[1][1]) * height;
+  // Affine bounds need two edge vectors, rather than four allocated corners.
+  return {
+    x: inverse[0][0] * world[0][2] + inverse[0][1] * world[1][2] + inverse[0][2] + Math.min(0, a) + Math.min(0, c),
+    y: inverse[1][0] * world[0][2] + inverse[1][1] * world[1][2] + inverse[1][2] + Math.min(0, b) + Math.min(0, d),
+    width: Math.abs(a) + Math.abs(c), height: Math.abs(b) + Math.abs(d)
+  };
 }
 
 function overlaps(a, b, gap = 0) {
@@ -55,18 +61,22 @@ function overlaps(a, b, gap = 0) {
 }
 
 function occupiedBounds(container, includeOutside = false) {
-  const children = container.children.filter(node => node.visible !== false).map(node => boundsInContainer(node, container));
-  const siblings = [];
+  const result = [], inverse = inverseTransform(container);
+  const board = { x: 0, y: 0, width: container.width, height: container.height };
+  function add(node, sibling = false) {
+    if (node.visible === false) return;
+    const bounds = boundsInContainer(node, container, inverse);
+    if (bounds.width > 0 && bounds.height > 0 &&
+        (!sibling || includeOutside || overlaps(bounds, board, IMAGE_GAP))) result.push(bounds);
+  }
+  for (const child of container.children) add(child);
   // References can visually sit on a board while being siblings in the Layers panel.
   if (container.type === 'FRAME') {
     for (let branch = container; branch.parent && branch.parent.type !== 'DOCUMENT'; branch = branch.parent) {
-      siblings.push(...branch.parent.children.filter(node => node !== branch && node.visible !== false));
+      for (const sibling of branch.parent.children) { if (sibling !== branch) add(sibling, true); }
     }
   }
-  const board = { x: 0, y: 0, width: container.width, height: container.height };
-  return children.concat(siblings.map(node => boundsInContainer(node, container))
-    .filter(bounds => includeOutside || overlaps(bounds, board, IMAGE_GAP)))
-    .filter(bounds => bounds.width > 0 && bounds.height > 0);
+  return result;
 }
 
 function median(values) {
@@ -84,15 +94,22 @@ function findPlacement(container, width, height) {
     y: median(nearby.map(b => b.y + b.height / 2))
   } : container.type === 'FRAME' ? { x: container.width / 2, y: container.height / 2 } : figma.viewport.center;
   const candidates = [];
+  const seen = new Set();
   function add(x, y) {
     if (container.type === 'FRAME') {
       x = Math.max(IMAGE_GAP, Math.min(x, container.width - width - IMAGE_GAP));
       y = Math.max(IMAGE_GAP, Math.min(y, container.height - height - IMAGE_GAP));
     }
-    candidates.push({ x, y, width, height });
+    const key = `${x},${y}`;
+    if (!seen.has(key)) { seen.add(key); candidates.push({ x, y, width, height }); }
   }
   add(anchor.x - width / 2, anchor.y - height / 2);
-  for (const b of nearby) {
+  // Bound the search independently of page size. All layers still participate
+  // in collision checks; only the nearest neighbours generate candidates.
+  const neighbours = nearby.slice().sort((a, b) =>
+    (a.x + a.width / 2 - anchor.x) ** 2 + (a.y + a.height / 2 - anchor.y) ** 2 -
+    ((b.x + b.width / 2 - anchor.x) ** 2 + (b.y + b.height / 2 - anchor.y) ** 2)).slice(0, 32);
+  for (const b of neighbours) {
     for (const y of [b.y, b.y + (b.height - height) / 2, b.y + b.height - height]) {
       add(b.x + b.width + IMAGE_GAP, y);
       add(b.x - width - IMAGE_GAP, y);
@@ -108,29 +125,51 @@ function findPlacement(container, width, height) {
     }
   }
   const distance = b => (b.x + width / 2 - anchor.x) ** 2 + (b.y + height / 2 - anchor.y) ** 2;
-  const valid = candidates.filter(b => (container.type === 'PAGE' ||
+  candidates.sort((a, b) => distance(a) - distance(b) || a.y - b.y || a.x - b.x);
+  const valid = candidates.find(b => (container.type === 'PAGE' ||
     (b.x + width + IMAGE_GAP <= container.width && b.y + height + IMAGE_GAP <= container.height)) &&
     occupied.every(other => !overlaps(b, other, IMAGE_GAP)));
-  valid.sort((a, b) => distance(a) - distance(b) || a.y - b.y || a.x - b.x);
   // A full board expands downward; existing references always stay where they are.
-  if (valid.length) return valid[0];
+  if (valid) return valid;
   const fallback = { x: container.type === 'FRAME'
     ? Math.max(IMAGE_GAP, Math.min(anchor.x - width / 2, container.width - width - IMAGE_GAP))
     : anchor.x - width / 2,
-    y: Math.max(container.type === 'FRAME' ? container.height : anchor.y,
-      ...nearby.map(b => b.y + b.height)) + IMAGE_GAP, width, height };
+    y: nearby.reduce((bottom, b) => Math.max(bottom, b.y + b.height),
+      container.type === 'FRAME' ? container.height : anchor.y) + IMAGE_GAP, width, height };
   // Expansion must also avoid page layers just beyond the board's current edge.
-  let blockers = occupied.filter(other => overlaps(fallback, other, IMAGE_GAP));
-  while (blockers.length) {
-    fallback.y = Math.max(...blockers.map(b => b.y + b.height)) + IMAGE_GAP;
-    blockers = occupied.filter(other => overlaps(fallback, other, IMAGE_GAP));
+  // Sweep once from top to bottom instead of rescanning after each blocker.
+  const blockers = occupied.filter(b => b.x < fallback.x + width + IMAGE_GAP &&
+    b.x + b.width + IMAGE_GAP > fallback.x).sort((a, b) => a.y - b.y);
+  for (const blocker of blockers) {
+    if (overlaps(fallback, blocker, IMAGE_GAP)) fallback.y = blocker.y + blocker.height + IMAGE_GAP;
   }
   return fallback;
 }
 
 function itemKey(job, imageID) { return `${job.id}.${imageID}`; }
+const batchIndexes = new WeakMap();
+function imageIndex(page, job, refresh = false) {
+  let batch = batchIndexes.get(page);
+  if (refresh || !batch || batch.id !== job.id) {
+    const index = new Map();
+    // Native filtering avoids a JavaScript callback and plugin-data read for
+    // every node on the page, including unrelated component descendants.
+    for (const node of page.findAllWithCriteria({ types: ['RECTANGLE'], pluginData: { keys: ['finderImage'] } })) {
+      const key = node.getPluginData('finderImage');
+      if (key.startsWith(`${job.id}.`) && !index.has(key)) index.set(key, node);
+    }
+    batch = { id: job.id, index };
+    batchIndexes.set(page, batch);
+  }
+  return batch.index;
+}
+
 function existingImage(page, job, imageID) {
-  return page.findOne(node => node.getPluginData('finderImage') === itemKey(job, imageID));
+  const node = imageIndex(page, job).get(itemKey(job, imageID));
+  if (!node || node.removed || node.getPluginData('finderImage') !== itemKey(job, imageID)) return null;
+  let ancestor = node;
+  while (ancestor && ancestor.type !== 'PAGE') ancestor = ancestor.parent;
+  return ancestor?.id === page.id ? node : null;
 }
 
 function growFrame(frame, width, height) {
@@ -147,8 +186,12 @@ async function importImage(job, imageID, bytes) {
   if (existing) return { nodeID: existing.id, reused: true };
   const metadata = job.images.find(image => image.id === imageID);
   if (!metadata) throw new Error('Image not found in this batch.');
-  const image = figma.createImage(new Uint8Array(bytes));
-  const dimensions = await image.getSizeAsync();
+  const image = figma.createImage(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  // The bridge already knows the normalized pixel dimensions. Avoid a second
+  // asynchronous decode in Figma; retain the fallback for older queued jobs.
+  const dimensions = Number.isFinite(metadata.width) && metadata.width > 0 &&
+    Number.isFinite(metadata.height) && metadata.height > 0
+    ? { width: metadata.width, height: metadata.height } : await image.getSizeAsync();
   // Validate again after asynchronous decoding: the user may have changed the frame.
   validateContainer(container);
   const autoLayout = container.type === 'FRAME' && container.layoutMode !== 'NONE';
@@ -166,16 +209,22 @@ async function importImage(job, imageID, bytes) {
     rectangle.rotation = 0;
     if (placement) { rectangle.x = placement.x; rectangle.y = placement.y; }
     if (autoLayout) {
-      const bounds = container.children.filter(node => node.visible && node.layoutPositioning !== 'ABSOLUTE')
-        .map(node => boundsInContainer(node, container));
-      growFrame(container,
-        Math.max(...bounds.map(b => b.x + b.width)) - Math.min(container.paddingLeft, ...bounds.map(b => b.x)) + container.paddingLeft + container.paddingRight,
-        Math.max(...bounds.map(b => b.y + b.height)) - Math.min(container.paddingTop, ...bounds.map(b => b.y)) + container.paddingTop + container.paddingBottom);
+      const inverse = inverseTransform(container);
+      let left = container.paddingLeft, top = container.paddingTop, right = -Infinity, bottom = -Infinity;
+      for (const node of container.children) {
+        if (!node.visible || node.layoutPositioning === 'ABSOLUTE') continue;
+        const b = boundsInContainer(node, container, inverse);
+        left = Math.min(left, b.x); top = Math.min(top, b.y);
+        right = Math.max(right, b.x + b.width); bottom = Math.max(bottom, b.y + b.height);
+      }
+      growFrame(container, right - left + container.paddingLeft + container.paddingRight,
+        bottom - top + container.paddingTop + container.paddingBottom);
     } else if (container.type === 'FRAME') {
       growFrame(container, rectangle.x + rectangle.width + IMAGE_GAP, rectangle.y + rectangle.height + IMAGE_GAP);
     }
     rectangle.setPluginData('finderImage', itemKey(job, imageID));
   } catch (error) { rectangle.remove(); throw error; }
+  imageIndex(page, job).set(itemKey(job, imageID), rectangle);
   figma.commitUndo();
   return { nodeID: rectangle.id, reused: false };
 }
@@ -208,7 +257,10 @@ async function handle(message) {
     }
     case 'prepare': {
       const { page } = await resolveDestination(message.job);
-      return { existing: message.job.images.filter(image => existingImage(page, message.job, image.id)).map(image => image.id) };
+      imageIndex(page, message.job, true);
+      const completed = new Set(message.job.completed || []);
+      return { existing: message.job.images.filter(image => !completed.has(image.id) &&
+        existingImage(page, message.job, image.id)).map(image => image.id) };
     }
     case 'import': return importImage(message.job, message.imageID, message.bytes);
     default: throw new Error('Unknown receiver action.');
@@ -216,6 +268,7 @@ async function handle(message) {
 }
 
 if (typeof figma !== 'undefined') {
+  figma.skipInvisibleInstanceChildren = true;
   figma.showUI(__html__, { width: 360, height: 82, themeColors: true });
   // Serialize mutations, including registration while a batch is arriving.
   let chain = Promise.resolve();
@@ -230,4 +283,4 @@ if (typeof figma !== 'undefined') {
   };
 }
 
-if (typeof module !== 'undefined') module.exports = { validateContainer, importImage, resolveDestination, boundsInContainer, occupiedBounds, overlaps, IMAGE_GAP };
+if (typeof module !== 'undefined') module.exports = { validateContainer, importImage, resolveDestination, boundsInContainer, occupiedBounds, overlaps, findPlacement, handle, IMAGE_GAP };

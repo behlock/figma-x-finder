@@ -59,6 +59,7 @@
   let sequence = 0, token = '', fileKey = null, busy = false, connected = false, pairing = false;
   let idleMessage = '';
   let savedChange = null;
+  let activeJob = null;
   const openApp = 'Open Figma x Finder on your Mac.';
   const $ = id => document.getElementById(id);
   const status = $('status'), save = $('save'), connect = $('connect');
@@ -76,9 +77,15 @@
   function rpc(type, payload = {}) {
     const requestID = ++sequence;
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => { pending.delete(requestID); reject(new Error('Figma did not respond. Close and rerun this receiver to retry.')); }, 30000);
-      pending.set(requestID, { resolve, reject, timeout });
-      parent.postMessage({ pluginMessage: { type, requestID, ...payload } }, '*');
+      const request = { resolve, reject };
+      request.timeout = setTimeout(() => {
+        // This is a warning, not cancellation: keep the operation and its
+        // promise alive so a late reply continues the original batch directly.
+        setStatus('Figma is taking longer than expected. Waiting for the current operation; close and rerun the receiver if it stays stuck.', 'warning');
+      }, 30000);
+      pending.set(requestID, request);
+      try { parent.postMessage({ pluginMessage: { type, requestID, ...payload } }, '*'); }
+      catch (error) { clearTimeout(request.timeout); pending.delete(requestID); reject(error); }
     });
   }
 
@@ -144,14 +151,16 @@
         return;
       }
       job = await response.json();
+      activeJob = job.id;
       save.disabled = true;
       setStatus('Receiving images…', 'busy');
       const prepared = await rpc('prepare', { job });
       const completed = new Set(job.completed);
+      const existing = new Set(prepared.existing);
       for (const image of job.images) {
         if (completed.has(image.id)) continue;
         setStatus(`Adding ${image.name}…`, 'busy');
-        if (!prepared.existing.includes(image.id)) {
+        if (!existing.has(image.id)) {
           const response = await api(`/v1/image?job=${encodeURIComponent(job.id)}&image=${encodeURIComponent(image.id)}&receiver=${encodeURIComponent(receiver)}`);
           const bytes = new Uint8Array(await response.arrayBuffer());
           await rpc('import', { job, imageID: image.id, bytes });
@@ -164,7 +173,7 @@
       save.disabled = true;
       setStatus(errorMessage(error));
       if (job) await api('/v1/error', { jobID: job.id, message: status.textContent, receiver }).catch(() => {});
-    } finally { busy = false; }
+    } finally { busy = false; activeJob = null; }
   }
 
   window.onmessage = event => {
@@ -252,5 +261,10 @@
     }
   };
   setInterval(poll, 2000);
+  // Keep ownership during slow decoding or page loading, including after a
+  // UI timeout. Another receiver must not take over an in-flight import.
+  setInterval(() => {
+    if (activeJob) api('/v1/lease', { jobID: activeJob, receiver }).catch(() => {});
+  }, 20000);
 </script>
 </html>

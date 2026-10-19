@@ -62,6 +62,7 @@ public final class Router {
     private var nextPairingAt = Date.distantPast
     public var onPairingRequest: ((PairingRequest) -> Void)?
     private var leases: [String: (receiver: String, expiry: Date)] = [:]
+    private var failures: [String: (attempts: Int, retryAt: Date)] = [:]
     public init(store: Store, now: @escaping () -> Date = Date.init) { self.store = store; self.now = now }
 
     public func confirmPairing(_ id: String, allow: Bool) {
@@ -130,26 +131,46 @@ public final class Router {
                 guard let key = value("fileKey"), let receiver = value("receiver"), receiver.count <= 100, !receiver.isEmpty else {
                     throw BridgeError.message("File and receiver are required.")
                 }
-                guard let job = store.jobs.first(where: { $0.destination.fileKey == key }) else { return HTTPResponse(status: 204) }
-                if let lease = leases[job.id], lease.receiver != receiver, lease.expiry > Date() {
+                let time = now()
+                let candidates = store.jobs.filter { job in
+                    job.destination.fileKey == key && (failures[job.id].map { $0.retryAt <= time } ?? true)
+                }
+                // Fresh work takes priority over a repeatedly failing destination.
+                guard let job = candidates.first(where: { $0.lastError == nil }) ?? candidates.first else {
                     return HTTPResponse(status: 204)
                 }
-                leases[job.id] = (receiver, Date().addingTimeInterval(60))
+                if let lease = leases[job.id], lease.receiver != receiver, lease.expiry > time {
+                    return HTTPResponse(status: 204)
+                }
+                leases[job.id] = (receiver, now().addingTimeInterval(60))
                 return try .json(job)
             case ("GET", "/v1/image"):
                 guard let jobID = value("job"), let imageID = value("image"),
                       let receiver = value("receiver"), leases[jobID]?.receiver == receiver else { return HTTPResponse(status: 409) }
-                leases[jobID] = (receiver, Date().addingTimeInterval(60))
-                return HTTPResponse(body: try store.imageData(jobID: jobID, imageID: imageID), contentType: "image/png")
+                leases[jobID] = (receiver, now().addingTimeInterval(60))
+                return HTTPResponse(body: try store.imageData(jobID: jobID, imageID: imageID),
+                                    contentType: try store.imageContentType(jobID: jobID, imageID: imageID))
+            case ("POST", "/v1/lease"):
+                let lease = try JSONDecoder().decode(DeliveryLease.self, from: request.body)
+                guard leases[lease.jobID]?.receiver == lease.receiver,
+                      store.jobs.contains(where: { $0.id == lease.jobID }) else { return HTTPResponse(status: 409) }
+                leases[lease.jobID] = (lease.receiver, now().addingTimeInterval(60))
+                return HTTPResponse(status: 204)
             case ("POST", "/v1/ack"):
                 let ack = try JSONDecoder().decode(Acknowledgement.self, from: request.body)
                 guard leases[ack.jobID]?.receiver == ack.receiver else { return HTTPResponse(status: 409) }
                 try store.acknowledge(jobID: ack.jobID, imageID: ack.imageID)
+                failures.removeValue(forKey: ack.jobID)
+                if store.jobs.contains(where: { $0.id == ack.jobID }) {
+                    leases[ack.jobID] = (ack.receiver, now().addingTimeInterval(60))
+                } else { leases.removeValue(forKey: ack.jobID) }
                 return HTTPResponse(status: 204)
             case ("POST", "/v1/error"):
                 let error = try JSONDecoder().decode(DeliveryError.self, from: request.body)
                 guard leases[error.jobID]?.receiver == error.receiver else { return HTTPResponse(status: 409) }
                 try store.reportError(jobID: error.jobID, message: error.message)
+                let attempts = min((failures[error.jobID]?.attempts ?? 0) + 1, 4)
+                failures[error.jobID] = (attempts, now().addingTimeInterval(min(30, 5 * pow(2, Double(attempts - 1)))))
                 return HTTPResponse(status: 204)
             default: return HTTPResponse(status: 404)
             }
@@ -157,6 +178,7 @@ public final class Router {
     }
 
     private struct Acknowledgement: Decodable { let jobID: String; let imageID: String; let receiver: String }
+    private struct DeliveryLease: Decodable { let jobID: String; let receiver: String }
     private struct DeliveryError: Decodable { let jobID: String; let message: String; let receiver: String }
 }
 
