@@ -4,7 +4,7 @@ Figma x Finder is a macOS Finder service that sends images straight to a saved p
 
 Useful when you're collecting references, building a moodboard, or bringing inspiration into a design file. Save a destination once, then send new selections from Finder whenever you need them.
 
-[![Select, preview, and send images from Finder to Figma](assets/demo.gif)](assets/demo.mp4)
+[Watch the demo: select, preview, and send images from Finder to Figma](assets/demo.mp4)
 
 ## Getting started
 

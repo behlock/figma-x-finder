@@ -16,7 +16,6 @@ cp App/Info.plist "$app/Contents/Info.plist"
 # Advertise exactly the image decoders available on this macOS version.
 swift scripts/configure-image-service.swift "$app/Contents/Info.plist"
 cp App/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
-cp NOTICE "$app/Contents/Resources/NOTICE"
 mkdir -p "$app/Contents/Resources/receiver"
 cp receiver/manifest.json receiver/code.js receiver/ui.html "$app/Contents/Resources/receiver/"
 codesign --force --sign - "$app"
